@@ -1989,7 +1989,7 @@ wheels = [
 ]
 
 [[package]]
-name = "openoats-asr-bench"
+name = "asr-bench"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -1997,6 +1997,7 @@ dependencies = [
     { name = "librosa" },
     { name = "nemo-toolkit", extra = ["asr"] },
     { name = "numpy" },
+    { name = "pyyaml" },
     { name = "rich" },
     { name = "soundfile" },
 ]
@@ -2007,6 +2008,7 @@ requires-dist = [
     { name = "librosa", specifier = ">=0.10" },
     { name = "nemo-toolkit", extras = ["asr"], specifier = ">=2.0.0" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13" },
     { name = "soundfile", specifier = ">=0.12" },
 ]

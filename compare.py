@@ -1,13 +1,14 @@
 """
 Build a side-by-side Markdown report from a bench run.
 
-    uv run python compare.py --run-name 12-33-session
+    uv run python compare.py --run-name standup-de__phone_2026-08-28
 
-Reads `runs/<run-name>/*/{mic,sys}.txt` + `*.metrics.json`, writes
-`runs/<run-name>/comparison.md` with per-channel columns, word-count /
-RTF / RAM summary, and a simple hallucination heuristic that flags each
-model's output for known failure modes (repeated phrases, Whisper's
-signature "Thank you for watching" ghosts, etc.).
+Reads `runs/<run-name>/*/<channel>.txt` + `*.metrics.json`, writes
+`runs/<run-name>/comparison.md` with an accuracy ranking (when the
+session had a reference transcript), a speed/RAM summary, a hallucination
+heuristic for known failure modes (repeated phrases, Whisper's signature
+"Thank you for watching" ghosts), and side-by-side transcript previews
+against the ground truth.
 """
 
 from __future__ import annotations
@@ -58,6 +59,25 @@ def longest_repeated_ngram(text: str, n: int = 5) -> tuple[str, int]:
     return top, count
 
 
+def load_run_info(run_dir: Path) -> dict:
+    """Read the run manifest bench.py writes. Older runs predate it, so
+    every consumer treats it as optional."""
+    info = run_dir / "run.json"
+    if info.exists():
+        return json.loads(info.read_text(encoding="utf-8"))
+    return {}
+
+
+def load_reference(run_info: dict, channel: str) -> str:
+    """Fetch the ground-truth text for a channel, if the session that
+    produced this run is still on disk."""
+    session = run_info.get("session")
+    if not session:
+        return ""
+    ref = Path(session) / "reference" / f"{channel}.txt"
+    return ref.read_text(encoding="utf-8").strip() if ref.exists() else ""
+
+
 def load_metrics(run_dir: Path) -> list[dict]:
     summary = run_dir / "summary.json"
     if summary.exists():
@@ -81,11 +101,47 @@ def build_report(run_dir: Path) -> str:
     for r in records:
         by_model.setdefault(r["model_id"], {})[r["channel"]] = r
 
+    run_info = load_run_info(run_dir)
+    scored = [r for r in records if r.get("accuracy")]
+
     lines: list[str] = []
     lines.append(f"# ASR bench — {run_dir.name}\n")
 
+    manifest = run_info.get("session_manifest") or {}
+    if manifest:
+        deg = (manifest.get("degradation") or {}).get("profile", "—")
+        lines.append(
+            f"Session `{manifest.get('name', '?')}` · "
+            f"language **{manifest.get('language', '?')}** · "
+            f"degradation **{deg}** · "
+            f"{manifest.get('duration_seconds', 0):.0f}s · "
+            f"{len(manifest.get('speakers') or [])} speakers · "
+            f"{manifest.get('word_count', 0)} reference words\n"
+        )
+
+    # ──── Accuracy ranking ────
+    if scored:
+        lines.append("## Accuracy (vs. ground truth)\n")
+        lines.append(
+            "Ranked by WER, best first. `WER raw` scores punctuation- and "
+            "case-normalised text only; `WER` additionally normalises "
+            "numbers, so the gap between the two is formatting rather than "
+            "misrecognition.\n"
+        )
+        lines.append("| Model | Channel | WER | CER | WER raw | Sub | Del | Ins | Ref words |")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+        for r in sorted(scored, key=lambda x: (x["channel"], x["accuracy"]["wer"])):
+            a = r["accuracy"]
+            lines.append(
+                f"| `{r['model_id']}` | {r['channel']} | "
+                f"**{a['wer']:.1%}** | {a['cer']:.1%} | {a['wer_raw']:.1%} | "
+                f"{a['substitutions']} | {a['deletions']} | {a['insertions']} | "
+                f"{a['reference_words']} |"
+            )
+        lines.append("")
+
     # ──── Performance table ────
-    lines.append("## Performance\n")
+    lines.append("## Speed & memory\n")
     lines.append("| Model | Channel | Audio | Wall | RTF | Words | Peak RSS | Error |")
     lines.append("|---|---|---:|---:|---:|---:|---:|---|")
     for model_id in sorted(by_model):
@@ -122,21 +178,25 @@ def build_report(run_dir: Path) -> str:
     lines.append(f"## Transcript previews (first ~{preview_chars} chars per cell)\n")
 
     channels = sorted({ch for m in by_model.values() for ch in m})
+    def cell(text: str) -> str:
+        text = (text or "").strip()
+        snippet = text[:preview_chars]
+        if len(text) > preview_chars:
+            snippet += f"… _(+{len(text) - preview_chars} more chars)_"
+        # Escape pipes to avoid breaking markdown tables.
+        return snippet.replace("|", "\\|").replace("\n", " ") or "_(empty)_"
+
     for ch in channels:
         lines.append(f"### Channel: `{ch}`\n")
         header_models = [m for m in sorted(by_model) if ch in by_model[m]]
-        lines.append("| " + " | ".join(header_models) + " |")
-        lines.append("|" + "|".join(["---"] * len(header_models)) + "|")
+        reference = load_reference(run_info, ch)
 
-        cells: list[str] = []
-        for model_id in header_models:
-            text = (by_model[model_id][ch].get("text") or "").strip()
-            snippet = text[:preview_chars]
-            if len(text) > preview_chars:
-                snippet += f"… _(+{len(text) - preview_chars} more chars)_"
-            # Escape pipes to avoid breaking markdown tables.
-            snippet = snippet.replace("|", "\\|").replace("\n", " ")
-            cells.append(snippet or "_(empty)_")
+        headers = (["**reference**"] if reference else []) + header_models
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+
+        cells = [cell(reference)] if reference else []
+        cells += [cell(by_model[m][ch].get("text") or "") for m in header_models]
         lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
 

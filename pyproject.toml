@@ -1,7 +1,7 @@
 [project]
-name = "openoats-asr-bench"
+name = "asr-bench"
 version = "0.1.0"
-description = "Side-by-side ASR benchmark harness for local open-weight models (Parakeet, Canary, Whisper) on OpenOats session audio."
+description = "Side-by-side ASR benchmark harness for local open-weight models (Parakeet, Canary, Whisper) on recorded session audio."
 requires-python = ">=3.11,<3.13"
 dependencies = [
     # Whisper-Large-v3 via CTranslate2 runtime — fast, Mac-friendly, no
@@ -21,9 +21,16 @@ dependencies = [
     "librosa>=0.10",
     "numpy>=1.26",
 
+    # Conversation scripts for the synthesiser. score.py deliberately has
+    # no scoring dependency: it ships its own Levenshtein alignment and
+    # number speller, and picks up jiwer / num2words automatically if you
+    # install them yourself.
+    "pyyaml>=6.0",
+
     # Report rendering
     "rich>=13",
 ]
+
 
 # bench.py loads the .env manually at import time so `uv run` keeps
 # the cache redirection even when invoked ad-hoc without a shell that

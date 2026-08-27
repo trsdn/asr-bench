@@ -1,0 +1,82 @@
+name: standup-de
+language: de
+notes: >
+  Deutsches Team-Standup mit drei Sprechern. Enthält bewusst die Dinge,
+  an denen ASR-Modelle scheitern: Anglizismen im deutschen Satz, Zahlen
+  und Versionsnummern, Eigennamen, Abkürzungen — plus zwei Stellen mit
+  überlappender Sprache (negatives `gap`).
+
+speakers:
+  - id: a
+    name: Anna
+    rate: 185
+  - id: b
+    name: Markus
+    rate: 170
+  - id: c
+    name: Petra
+    rate: 195
+
+turns:
+  - speaker: a
+    text: "Guten Morgen zusammen, dann fangen wir mal an mit dem Standup."
+  - speaker: a
+    text: "Markus, magst du anfangen?"
+    gap: 0.3
+  - speaker: b
+    text: "Klar. Ich habe gestern das Deployment auf Version zwei Punkt vier Punkt eins durchgezogen."
+    gap: 0.5
+  - speaker: b
+    text: "Die Latenz im Backend liegt jetzt bei ungefähr hundertzwanzig Millisekunden im Durchschnitt."
+  - speaker: b
+    text: "Heute schaue ich mir den Caching-Layer an, da haben wir noch eine Race Condition."
+  - speaker: a
+    text: "Ist das der Bug aus Ticket dreitausendsiebenhundertzwölf?"
+    gap: 0.25
+  - speaker: b
+    text: "Genau der. Ich glaube das Problem sitzt im Retry-Handling."
+    gap: 0.4
+  - speaker: c
+    text: "Kurzer Einwurf dazu."
+    gap: -0.35
+  - speaker: c
+    text: "Wir hatten den gleichen Effekt letzte Woche im Staging, das lag an der Zeitzone."
+    gap: 0.3
+  - speaker: b
+    text: "Okay, das schaue ich mir an. Danke Petra."
+  - speaker: a
+    text: "Petra, wie sieht es bei dir aus?"
+    gap: 0.5
+  - speaker: c
+    text: "Ich bin fast durch mit dem Reporting-Dashboard."
+    gap: 0.35
+  - speaker: c
+    text: "Die Aggregation über die letzten neunzig Tage dauert allerdings noch zu lange, gut acht Sekunden."
+  - speaker: c
+    text: "Ich würde da gerne einen Index auf die Session-Tabelle legen."
+  - speaker: a
+    text: "Klingt sinnvoll. Sprich das aber bitte kurz mit Yannick ab, der hat da letztens etwas umgebaut."
+    gap: 0.45
+  - speaker: c
+    text: "Mache ich, ich schreibe ihm nachher im Chat."
+    gap: 0.3
+  - speaker: a
+    text: "Von meiner Seite: ich sitze weiter an der Migration von Postgres vierzehn auf sechzehn."
+    gap: 0.6
+  - speaker: a
+    text: "Das Rollback-Skript steht, getestet ist es aber noch nicht vollständig."
+  - speaker: b
+    text: "Brauchst du dafür ein Wartungsfenster?"
+    gap: 0.3
+  - speaker: a
+    text: "Ja, ich würde Donnerstagabend ab neunzehn Uhr vorschlagen."
+    gap: 0.35
+  - speaker: c
+    text: "Donnerstag passt mir."
+    gap: -0.2
+  - speaker: b
+    text: "Von mir aus auch, ich bin dann als Backup da."
+    gap: 0.4
+  - speaker: a
+    text: "Perfekt, dann trage ich das ein. Damit sind wir durch, danke euch."
+    gap: 0.5

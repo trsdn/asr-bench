@@ -1,0 +1,78 @@
+name: support-call-en
+language: en
+notes: >
+  Two-party support call — the classic telephony scenario. Pair this
+  script with the `phone` or `voip` degradation profile to measure how
+  much a narrowband codec actually costs you in WER. Heavy on the things
+  that matter and are easy to get wrong: order IDs, email addresses,
+  spelled-out names, and dates.
+
+speakers:
+  - id: agent
+    name: Sarah
+    rate: 180
+  - id: caller
+    name: David
+    rate: 165
+
+turns:
+  - speaker: agent
+    text: "Thanks for calling support, my name is Sarah. How can I help you today?"
+  - speaker: caller
+    text: "Hi Sarah. I placed an order last Tuesday and it still hasn't shipped."
+    gap: 0.4
+  - speaker: agent
+    text: "I'm sorry about that. Could you give me the order number?"
+    gap: 0.35
+  - speaker: caller
+    text: "Sure, it's four eight two one, dash, seven seven three."
+    gap: 0.3
+  - speaker: agent
+    text: "Four eight two one, dash, seven seven three. Let me pull that up."
+    gap: 0.5
+  - speaker: agent
+    text: "Right, I can see it. It's showing as awaiting stock at the Rotterdam warehouse."
+    gap: 1.2
+  - speaker: caller
+    text: "Any idea how long that takes?"
+    gap: 0.3
+  - speaker: agent
+    text: "The restock is scheduled for the eighteenth, so it should go out within two business days after that."
+    gap: 0.4
+  - speaker: caller
+    text: "That's later than I was told when I ordered."
+    gap: 0.25
+  - speaker: caller
+    text: "Can I cancel it and order the other model instead?"
+  - speaker: agent
+    text: "Absolutely, since it hasn't shipped I can cancel it right now."
+    gap: 0.4
+  - speaker: agent
+    text: "Can you confirm the email on the account?"
+    gap: 0.3
+  - speaker: caller
+    text: "It's d dot mueller at example dot com. That's m u e l l e r."
+    gap: 0.35
+  - speaker: agent
+    text: "Got it, thank you. The cancellation is going through now."
+    gap: 0.6
+  - speaker: agent
+    text: "You'll see the refund back on the card within three to five working days."
+  - speaker: caller
+    text: "And the refund is the full amount?"
+    gap: -0.25
+  - speaker: agent
+    text: "The full amount, including the shipping you paid, yes."
+    gap: 0.35
+  - speaker: caller
+    text: "Great, that works. Thanks for sorting it out so quickly."
+    gap: 0.4
+  - speaker: agent
+    text: "My pleasure. Is there anything else I can help you with today?"
+    gap: 0.3
+  - speaker: caller
+    text: "No, that was everything. Have a good one."
+    gap: 0.3
+  - speaker: agent
+    text: "You too. Thanks for calling."
+    gap: 0.3

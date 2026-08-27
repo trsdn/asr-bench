@@ -1,0 +1,629 @@
+"""
+synth.py — build synthetic multi-speaker conversations with known ground truth.
+
+Recording real meetings gives you audio but no reference transcript, so
+you can only ever eyeball model outputs against each other. Synthesising
+the conversation from a script inverts that: we *start* from the text, so
+every session ships a word-exact reference and the benchmark can report
+real WER instead of vibes.
+
+Pipeline
+--------
+    conversation script (YAML)
+      → one TTS render per turn (macOS `say`, or Piper)
+      → laid out on a timeline with pauses / overlaps
+      → per-speaker isolated channels + one mixed conversation channel
+      → optional degradation profile (see degrade.py)
+      → session dir with audio/, reference/, reference.json, session.json
+
+Usage
+-----
+    # one session per difficulty level, from the same script
+    uv run python synth.py --script conversations/standup-de.yaml \\
+        --degrade clean phone farfield
+
+    uv run python bench.py --session sessions/standup-de__phone \\
+        --models whisper-large-v3
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+
+from audio_io import TARGET_SR, load_mono_16k, write_wav
+from degrade import PROFILES, apply_profile
+
+REPO_DIR = Path(__file__).resolve().parent
+TTS_CACHE = REPO_DIR / ".tts-cache"
+
+DEFAULT_GAP = 0.35        # seconds of silence between turns
+LEAD_IN = 0.5             # silence before the first turn
+TAIL = 0.8                # silence after the last turn
+
+# macOS ships a pile of "novelty" voices (Bells, Zarvox, …) that are
+# singing or robotic. They'd make the benchmark measure the wrong thing,
+# so auto-assignment skips them; an explicit `voice:` in the script can
+# still select one deliberately.
+NOVELTY_VOICES = {
+    "Albert", "Bad News", "Bahh", "Bells", "Boing", "Bubbles", "Cellos",
+    "Good News", "Jester", "Organ", "Superstar", "Trinoids", "Whisper",
+    "Wobble", "Zarvox", "Hysterical", "Deranged", "Bruce", "Junior",
+    "Kathy", "Princess", "Ralph", "Fred", "Agnes", "Bad Nachricht",
+}
+
+# Preferred natural voices per language, in assignment order. Anything
+# not installed on this machine is skipped silently.
+PREFERRED_VOICES = {
+    "de": ["Anna", "Markus", "Petra", "Yannick", "Helena", "Martin", "Viktor"],
+    "en": ["Samantha", "Daniel", "Karen", "Alex", "Moira", "Tom", "Fiona", "Rishi"],
+    "fr": ["Thomas", "Amelie", "Audrey", "Aurelie"],
+    "es": ["Monica", "Jorge", "Paulina", "Diego"],
+    "it": ["Alice", "Luca", "Federica"],
+}
+
+
+# ──────────────────────────────────────────────
+# Script model
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class Speaker:
+    id: str
+    name: str
+    voice: str | None = None
+    rate: int | None = None       # words per minute (`say` only)
+    backend: str | None = None    # override the global TTS backend
+
+
+@dataclass
+class Turn:
+    speaker: str
+    text: str
+    gap: float = DEFAULT_GAP      # silence before this turn; negative = overlap
+
+
+@dataclass
+class Conversation:
+    name: str
+    language: str
+    speakers: list[Speaker]
+    turns: list[Turn]
+    notes: str = ""
+    _by_id: dict[str, Speaker] = field(default_factory=dict, repr=False)
+
+    def speaker(self, sid: str) -> Speaker:
+        return self._by_id[sid]
+
+
+def load_script(path: Path) -> Conversation:
+    """Parse a conversation YAML into a validated `Conversation`.
+
+    Validation is strict and up-front: a typo'd speaker id in turn 40 of a
+    long script should fail before we spend a minute on TTS."""
+    import yaml
+
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a YAML mapping at the top level")
+
+    speakers = [
+        Speaker(
+            id=str(s["id"]),
+            name=str(s.get("name", s["id"])),
+            voice=s.get("voice"),
+            rate=s.get("rate"),
+            backend=s.get("backend"),
+        )
+        for s in raw.get("speakers", [])
+    ]
+    if not speakers:
+        raise ValueError(f"{path}: no speakers defined")
+
+    by_id = {s.id: s for s in speakers}
+    if len(by_id) != len(speakers):
+        raise ValueError(f"{path}: duplicate speaker ids")
+
+    turns: list[Turn] = []
+    for i, t in enumerate(raw.get("turns", [])):
+        sid = str(t["speaker"])
+        if sid not in by_id:
+            raise ValueError(
+                f"{path}: turn {i} references unknown speaker {sid!r} "
+                f"(known: {', '.join(by_id)})"
+            )
+        text = str(t["text"]).strip()
+        if not text:
+            raise ValueError(f"{path}: turn {i} has empty text")
+        turns.append(Turn(speaker=sid, text=text, gap=float(t.get("gap", DEFAULT_GAP))))
+
+    if not turns:
+        raise ValueError(f"{path}: no turns defined")
+
+    return Conversation(
+        name=str(raw.get("name", path.stem)),
+        language=str(raw.get("language", "en")),
+        speakers=speakers,
+        turns=turns,
+        notes=str(raw.get("notes", "")),
+        _by_id=by_id,
+    )
+
+
+# ──────────────────────────────────────────────
+# TTS backends
+# ──────────────────────────────────────────────
+
+
+def list_say_voices() -> list[tuple[str, str]]:
+    """Return [(voice_name, locale)] from `say -v '?'`. Empty list if we
+    aren't on macOS or `say` is unavailable."""
+    if shutil.which("say") is None:
+        return []
+    try:
+        out = subprocess.run(
+            ["say", "-v", "?"], capture_output=True, check=True, text=True
+        ).stdout
+    except subprocess.CalledProcessError:
+        return []
+
+    voices: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        # Column widths vary: padded for short names, a single space for
+        # long locale-qualified ones, so we anchor on the locale + '#'.
+        m = re.match(r"^(.+?)\s+([a-z]{2}(?:_[A-Z]{2})?)\s+#", line)
+        if m:
+            voices.append((m.group(1).strip(), m.group(2)))
+    return voices
+
+
+def assign_voices(conv: Conversation, backend: str) -> dict[str, str]:
+    """Pick a distinct voice per speaker.
+
+    Distinctness matters more than realism here: if two speakers share a
+    voice, diarisation and speaker-attribution numbers become meaningless.
+    Explicit `voice:` entries in the script always win."""
+    if backend == "piper":
+        missing = [s.id for s in conv.speakers if not s.voice]
+        if missing:
+            raise ValueError(
+                "Piper backend requires an explicit `voice:` (path to a .onnx "
+                f"model) for every speaker. Missing for: {', '.join(missing)}"
+            )
+        return {s.id: s.voice for s in conv.speakers}
+
+    available = list_say_voices()
+    if not available:
+        raise RuntimeError(
+            "macOS `say` not available. Use --tts piper with explicit voice "
+            "models, or run on macOS."
+        )
+
+    lang = conv.language.split("-")[0].split("_")[0].lower()
+    by_name = {name: locale for name, locale in available}
+
+    def base_name(voice: str) -> str:
+        """'Eddy (Deutsch (Deutschland))' → 'Eddy'. Recent macOS releases
+        expose most voices only in this locale-qualified form."""
+        return voice.split(" (", 1)[0].strip()
+
+    # Candidate pool in tiers: curated names first, then plain names, then
+    # locale-qualified ones. The tiers matter because the first speakers
+    # in a script get the most natural-sounding voices, and a benchmark
+    # should not be harder for speaker C than for speaker A by accident.
+    pool = [v for v in PREFERRED_VOICES.get(lang, []) if v in by_name]
+    for qualified in (False, True):
+        for name, locale in available:
+            if not locale.lower().startswith(lang):
+                continue
+            if ("(" in name) != qualified:
+                continue
+            if base_name(name) in NOVELTY_VOICES or name in pool:
+                continue
+            pool.append(name)
+
+    taken = {s.voice for s in conv.speakers if s.voice}
+    assigned: dict[str, str] = {}
+    for spk in conv.speakers:
+        if spk.voice:
+            if spk.voice not in by_name:
+                raise ValueError(
+                    f"Voice {spk.voice!r} for speaker {spk.id!r} is not installed. "
+                    f"Run `say -v '?'` to list available voices."
+                )
+            assigned[spk.id] = spk.voice
+            continue
+        candidate = next((v for v in pool if v not in taken), None)
+        if candidate is None:
+            raise RuntimeError(
+                f"Not enough distinct {lang!r} voices installed for "
+                f"{len(conv.speakers)} speakers. Install more in System "
+                f"Settings → Accessibility → Spoken Content, or set `voice:` "
+                f"explicitly in the script."
+            )
+        assigned[spk.id] = candidate
+        taken.add(candidate)
+    return assigned
+
+
+def synth_turn(
+    text: str,
+    voice: str,
+    backend: str,
+    rate: int | None,
+    sr: int = TARGET_SR,
+) -> np.ndarray:
+    """Render one utterance to mono float32 at `sr`, with an on-disk cache.
+
+    The cache key covers everything that affects the waveform, so
+    regenerating the same script at three degradation levels costs one TTS
+    pass, not three."""
+    key_src = json.dumps(
+        {"t": text, "v": voice, "b": backend, "r": rate, "sr": sr}, sort_keys=True
+    )
+    key = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:20]
+    cached = TTS_CACHE / f"{key}.wav"
+    if cached.exists():
+        return load_mono_16k(cached, sr)
+
+    TTS_CACHE.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        if backend == "say":
+            raw = tmpdir / "turn.aiff"
+            # Text goes through a file, not argv: utterances contain
+            # quotes, dashes and other characters `say` would otherwise
+            # interpret or the shell would mangle.
+            txt_file = tmpdir / "turn.txt"
+            txt_file.write_text(text, encoding="utf-8")
+            cmd = ["say", "-v", voice, "-o", str(raw), "-f", str(txt_file)]
+            if rate:
+                cmd += ["-r", str(rate)]
+            subprocess.run(cmd, capture_output=True, check=True)
+        elif backend == "piper":
+            raw = tmpdir / "turn.wav"
+            piper = shutil.which("piper") or shutil.which("piper-tts")
+            if piper is None:
+                raise RuntimeError(
+                    "piper not found on PATH. Install it (`uv tool install "
+                    "piper-tts`) or use --tts say."
+                )
+            subprocess.run(
+                [piper, "--model", voice, "--output_file", str(raw)],
+                input=text.encode("utf-8"), capture_output=True, check=True,
+            )
+        else:
+            raise ValueError(f"Unknown TTS backend: {backend}")
+
+        audio = load_mono_16k(raw, sr)
+
+    audio = trim_silence(audio, sr)
+    write_wav(cached, audio, sr)
+    return audio
+
+
+def trim_silence(audio: np.ndarray, sr: int, threshold_db: float = -45.0) -> np.ndarray:
+    """Trim leading/trailing silence so the script's `gap` values are the
+    only thing controlling timing. TTS engines pad utterances by varying
+    amounts; without this the ground-truth timestamps drift."""
+    if audio.size == 0:
+        return audio
+    peak = float(np.max(np.abs(audio)))
+    if peak <= 0:
+        return audio
+    thresh = peak * (10.0 ** (threshold_db / 20.0))
+    above = np.flatnonzero(np.abs(audio) > thresh)
+    if above.size == 0:
+        return audio
+    pad = int(0.02 * sr)  # keep 20 ms so plosives aren't clipped off
+    start = max(0, int(above[0]) - pad)
+    end = min(audio.size, int(above[-1]) + pad)
+    return audio[start:end]
+
+
+# ──────────────────────────────────────────────
+# Timeline assembly
+# ──────────────────────────────────────────────
+
+
+@dataclass
+class Segment:
+    speaker: str
+    speaker_name: str
+    start: float
+    end: float
+    text: str
+
+    def to_json(self) -> dict:
+        return {
+            "speaker": self.speaker,
+            "speaker_name": self.speaker_name,
+            "start": round(self.start, 3),
+            "end": round(self.end, 3),
+            "text": self.text,
+        }
+
+
+def build_timeline(
+    conv: Conversation,
+    voices: dict[str, str],
+    backend: str,
+    sr: int = TARGET_SR,
+    verbose: bool = True,
+) -> tuple[dict[str, np.ndarray], list[Segment]]:
+    """Render every turn and lay it out on a shared timeline.
+
+    Returns per-speaker isolated tracks (full length, silent when that
+    speaker isn't talking) plus the ground-truth segments. Mixing is left
+    to the caller so it can also emit the isolated channels."""
+    rendered: list[tuple[Turn, np.ndarray]] = []
+    for i, turn in enumerate(conv.turns):
+        spk = conv.speaker(turn.speaker)
+        audio = synth_turn(
+            turn.text,
+            voices[turn.speaker],
+            spk.backend or backend,
+            spk.rate,
+            sr,
+        )
+        rendered.append((turn, audio))
+        if verbose:
+            print(
+                f"  [{i + 1}/{len(conv.turns)}] {spk.name} "
+                f"({voices[turn.speaker]}): {len(audio) / sr:5.2f}s  "
+                f"{turn.text[:60]}{'…' if len(turn.text) > 60 else ''}"
+            )
+
+    # First pass: absolute sample offsets. A negative `gap` pulls the turn
+    # back into the previous one, producing real overlapped speech.
+    cursor = LEAD_IN
+    placements: list[tuple[Turn, np.ndarray, int]] = []
+    segments: list[Segment] = []
+    for turn, audio in rendered:
+        start = max(0.0, cursor + turn.gap)
+        offset = int(round(start * sr))
+        duration = len(audio) / sr
+        placements.append((turn, audio, offset))
+        segments.append(
+            Segment(
+                speaker=turn.speaker,
+                speaker_name=conv.speaker(turn.speaker).name,
+                start=start,
+                end=start + duration,
+                text=turn.text,
+            )
+        )
+        cursor = start + duration
+
+    total = int(round((cursor + TAIL) * sr))
+    tracks = {s.id: np.zeros(total, dtype=np.float32) for s in conv.speakers}
+    for turn, audio, offset in placements:
+        end = min(total, offset + len(audio))
+        tracks[turn.speaker][offset:end] += audio[: end - offset]
+
+    return tracks, segments
+
+
+def overlap_seconds(segments: list["Segment"]) -> float:
+    """Total time where more than one speaker is talking.
+
+    Computed as (sum of segment durations − length of their union) rather
+    than from the `gap` values, which only describe the intended offset
+    and say nothing about how long the rendered audio actually turned
+    out."""
+    if not segments:
+        return 0.0
+    total = sum(s.end - s.start for s in segments)
+
+    union = 0.0
+    ordered = sorted(segments, key=lambda s: s.start)
+    cur_start, cur_end = ordered[0].start, ordered[0].end
+    for seg in ordered[1:]:
+        if seg.start > cur_end:
+            union += cur_end - cur_start
+            cur_start, cur_end = seg.start, seg.end
+        else:
+            cur_end = max(cur_end, seg.end)
+    union += cur_end - cur_start
+    return max(0.0, total - union)
+
+
+def normalise_peak(audio: np.ndarray, target: float = 0.89) -> np.ndarray:
+    """Scale to a fixed peak so degradation SNRs mean the same thing across
+    sessions regardless of how loud a given voice renders."""
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak <= 0:
+        return audio
+    return (audio * (target / peak)).astype(np.float32)
+
+
+# ──────────────────────────────────────────────
+# Session writing
+# ──────────────────────────────────────────────
+
+
+def write_session(
+    out_dir: Path,
+    conv: Conversation,
+    voices: dict[str, str],
+    backend: str,
+    tracks: dict[str, np.ndarray],
+    segments: list[Segment],
+    profile: str,
+    seed: int,
+    isolated: bool,
+    sr: int = TARGET_SR,
+) -> Path:
+    """Write one session directory: audio, ground truth, and manifest."""
+    audio_dir = out_dir / "audio"
+    ref_dir = out_dir / "reference"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    ref_dir.mkdir(parents=True, exist_ok=True)
+
+    mixed = normalise_peak(np.sum(list(tracks.values()), axis=0))
+
+    channels: dict[str, np.ndarray] = {"mixed": mixed}
+    if isolated:
+        for sid, track in tracks.items():
+            channels[f"spk-{sid}"] = normalise_peak(track)
+
+    # Distinct noise realisation per channel (seed + index) so isolated
+    # tracks aren't degraded with a correlated copy of the same noise —
+    # that would be an unrealistically easy denoising target.
+    channel_segments: dict[str, list[Segment]] = {}
+    for idx, (name, audio) in enumerate(sorted(channels.items())):
+        degraded = apply_profile(audio, sr, profile, seed=seed + idx)
+        write_wav(audio_dir / f"{name}.wav", degraded, sr)
+
+        if name == "mixed":
+            segs = segments
+        else:
+            sid = name.removeprefix("spk-")
+            segs = [s for s in segments if s.speaker == sid]
+        channel_segments[name] = segs
+        (ref_dir / f"{name}.txt").write_text(
+            " ".join(s.text for s in segs) + "\n", encoding="utf-8"
+        )
+
+    reference = {
+        "channels": {
+            name: [s.to_json() for s in segs]
+            for name, segs in channel_segments.items()
+        }
+    }
+    (out_dir / "reference.json").write_text(
+        json.dumps(reference, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    duration = len(mixed) / sr
+    speech = sum(s.end - s.start for s in segments)
+    manifest = {
+        "name": out_dir.name,
+        "source": "synthetic",
+        "script": conv.name,
+        "language": conv.language,
+        "notes": conv.notes,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "sample_rate": sr,
+        "duration_seconds": round(duration, 2),
+        "speech_seconds": round(speech, 2),
+        "overlap_seconds": round(overlap_seconds(segments), 2),
+        "channels": sorted(channels),
+        "reference": True,
+        "degradation": {"profile": profile, "seed": seed},
+        "tts": {"backend": backend},
+        "speakers": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "voice": voices[s.id],
+                "channel": f"spk-{s.id}" if isolated else None,
+                "turns": sum(1 for t in conv.turns if t.speaker == s.id),
+            }
+            for s in conv.speakers
+        ],
+        "word_count": sum(len(s.text.split()) for s in segments),
+    }
+    (out_dir / "session.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return out_dir
+
+
+# ──────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument(
+        "--script", type=Path, required=True,
+        help="Conversation YAML (see conversations/ for examples).",
+    )
+    ap.add_argument(
+        "--out", type=Path, default=None,
+        help="Session directory. Default: sessions/<script>__<profile>.",
+    )
+    ap.add_argument(
+        "--degrade", nargs="+", default=["clean"], choices=sorted(PROFILES),
+        help="Degradation profile(s). One session is written per profile, "
+             "which is the intended way to build a difficulty ladder.",
+    )
+    ap.add_argument(
+        "--tts", default="say", choices=["say", "piper"],
+        help="TTS backend. Default: macOS `say`.",
+    )
+    ap.add_argument(
+        "--seed", type=int, default=0,
+        help="Noise seed — same seed gives byte-identical audio.",
+    )
+    ap.add_argument(
+        "--no-isolated", action="store_true",
+        help="Only write the mixed conversation channel.",
+    )
+    ap.add_argument(
+        "--list-voices", action="store_true",
+        help="Print installed `say` voices for the script language and exit.",
+    )
+    args = ap.parse_args()
+
+    conv = load_script(args.script.expanduser().resolve())
+
+    if args.list_voices:
+        lang = conv.language.split("-")[0].split("_")[0].lower()
+        for name, locale in list_say_voices():
+            if locale.lower().startswith(lang):
+                flag = " (novelty)" if name in NOVELTY_VOICES else ""
+                print(f"{name:32} {locale}{flag}")
+        return 0
+
+    voices = assign_voices(conv, args.tts)
+    print(f"Script '{conv.name}' — {len(conv.speakers)} speakers, {len(conv.turns)} turns")
+    for spk in conv.speakers:
+        print(f"  {spk.id}: {spk.name} → voice {voices[spk.id]}")
+
+    print("\nSynthesising turns…")
+    tracks, segments = build_timeline(conv, voices, args.tts)
+
+    written: list[Path] = []
+    for profile in args.degrade:
+        if args.out and len(args.degrade) == 1:
+            out_dir = args.out.expanduser().resolve()
+        else:
+            base = args.out or (REPO_DIR / "sessions")
+            out_dir = Path(base).expanduser().resolve() / f"{conv.name}__{profile}"
+        print(f"\nWriting [{profile}] → {out_dir}")
+        write_session(
+            out_dir, conv, voices, args.tts, tracks, segments,
+            profile=profile, seed=args.seed, isolated=not args.no_isolated,
+        )
+        written.append(out_dir)
+
+    print("\nDone. Benchmark with:")
+    for out_dir in written:
+        try:
+            shown = out_dir.relative_to(Path.cwd())
+        except ValueError:
+            shown = out_dir
+        print(f"  uv run python bench.py --session {shown}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -10,6 +10,12 @@ __pycache__/
 # they can be hundreds of MB per run.
 runs/
 
+# Generated sessions (synthetic audio + references) and the TTS render
+# cache. Both are reproducible from conversations/*.yaml, so they stay
+# out of git — the scripts are the source of truth, not the waveforms.
+sessions/
+.tts-cache/
+
 # Any audio the user drops here for ad-hoc testing.
 audio/
 *.caf

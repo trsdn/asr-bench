@@ -1,25 +1,31 @@
 """
-openoats-asr-bench — side-by-side ASR model comparison on OpenOats session audio.
+asr-bench — side-by-side ASR model comparison on multi-speaker session audio.
+
+Works on two kinds of session:
+
+  * synthetic sessions built by `synth.py`, which ship a word-exact
+    reference transcript — these give real WER/CER numbers;
+  * any recorded session directory with an `audio/` folder — these give
+    speed/RAM numbers and side-by-side transcripts, but no error rate.
 
 Usage:
 
-    uv run python bench.py \
-        --session ~/Library/Application\\ Support/OpenOats/sessions/session_2026-04-22_12-33-37 \
-        --models parakeet canary whisper-large-v3 \
-        --run-name 12-33-session
+    uv run python synth.py --script conversations/standup-de.yaml --degrade phone
+    uv run python bench.py --session sessions/standup-de__phone \\
+        --models canary whisper-large-v3 \\
+        --run-name phone-test
 
-Each model runs once on both `mic.caf` and `sys.caf` from the session
-folder; transcript + metrics (wall-clock, RTF, peak RAM) land under
+Each model runs once per channel; transcript + metrics (wall-clock, RTF,
+peak RAM, WER/CER when a reference exists) land under
 `runs/<run-name>/<model>/`.
 
 Design notes
 ------------
-- All HF / NeMo / torch caches are redirected to `/Volumes/big/aimodels/`
-  via the `.env` file next to this script so `~/` doesn't fill up with
-  model weights.
+- All HF / NeMo / torch caches are redirected via the `.env` file next to
+  this script so `~/` doesn't fill up with model weights.
 - Each model runs in its own function, isolated so a failure in one
   doesn't kill the rest of the matrix.
-- We avoid a shared abstraction because the three runtimes (NeMo,
+- We avoid a shared abstraction because the runtimes (NeMo,
   faster-whisper) have different load / infer signatures and smashing
   them into one interface obscures more than it saves.
 """
@@ -28,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import itertools
 import json
 import os
 import resource
@@ -45,7 +52,7 @@ if not _env_file.exists():
     _example = _repo_dir / ".env.example"
     if _example.exists():
         print(
-            f"[openoats-asr-bench] no .env found — falling back to {_example.name}. "
+            f"[asr-bench] no .env found — falling back to {_example.name}. "
             f"Copy it to .env and edit paths for your machine.",
             file=sys.stderr,
         )
@@ -63,70 +70,17 @@ import soundfile as sf  # noqa: E402
 from rich.console import Console  # noqa: E402
 from rich.table import Table  # noqa: E402
 
+from audio_io import TARGET_SR, load_mono_16k  # noqa: E402
+from score import score as score_transcript  # noqa: E402
+
+# Silence padded around every NeMo window. Attention decoders are prone
+# to emitting EOS straight away when a window starts or ends abruptly.
+NEMO_PAD_SECONDS = 0.3
+# How often an empty window may be split in half before we accept the
+# empty result. 3 takes a 15 s window down to ~2 s.
+NEMO_MAX_RETRY_DEPTH = 3
+
 console = Console()
-
-
-# ──────────────────────────────────────────────
-# Audio loading
-# ──────────────────────────────────────────────
-
-TARGET_SR = 16_000
-
-
-def load_mono_16k(path: Path) -> np.ndarray:
-    """Read `path`, downmix to mono, resample to 16 kHz. Returns float32
-    in [-1, 1].
-
-    First tries libsndfile (via soundfile); some CAF variants written by
-    AVAudioFile aren't parseable there, so we fall back to ffmpeg which
-    handles every CAF codec in the wild. ffmpeg is a hard runtime
-    dependency — install via `brew install ffmpeg` on macOS."""
-    try:
-        audio, sr = sf.read(str(path), dtype="float32", always_2d=True)
-        if audio.shape[1] > 1:
-            audio = audio.mean(axis=1)
-        else:
-            audio = audio[:, 0]
-    except Exception as libsnd_err:
-        audio, sr = _ffmpeg_decode(path)
-        if audio is None:
-            raise RuntimeError(
-                f"Could not decode {path} via soundfile or ffmpeg: {libsnd_err}"
-            )
-    if sr != TARGET_SR:
-        import librosa  # lazy — librosa pulls in scipy etc.
-        audio = librosa.resample(audio, orig_sr=sr, target_sr=TARGET_SR)
-    return audio.astype(np.float32, copy=False)
-
-
-def _ffmpeg_decode(path: Path) -> tuple[np.ndarray | None, int]:
-    """Decode `path` to mono float32 16 kHz via a single ffmpeg subprocess
-    call. Returns (samples, sample_rate) or (None, 0) on failure."""
-    import shutil
-    import subprocess
-
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        return None, 0
-
-    cmd = [
-        ffmpeg,
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-i", str(path),
-        "-ac", "1",             # downmix to mono
-        "-ar", str(TARGET_SR),  # resample to 16 kHz
-        "-f", "f32le",          # raw float32 little-endian
-        "pipe:1",
-    ]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"[ffmpeg] failed: {exc.stderr.decode(errors='replace')}", file=sys.stderr)
-        return None, 0
-    samples = np.frombuffer(proc.stdout, dtype=np.float32)
-    return samples, TARGET_SR
 
 
 # ──────────────────────────────────────────────
@@ -137,13 +91,20 @@ def _ffmpeg_decode(path: Path) -> tuple[np.ndarray | None, int]:
 @dataclass
 class ModelRun:
     model_id: str
-    channel: str        # "mic" | "sys"
+    channel: str         # whatever channels the session provides
     audio_seconds: float
     wall_seconds: float
     rtf: float           # wall / audio (< 1 = faster than realtime)
     peak_rss_mb: float
     text: str
     error: str | None = None
+    # Populated only for sessions that carry a reference transcript
+    # (i.e. anything produced by synth.py).
+    accuracy: dict | None = None
+
+    @property
+    def wer(self) -> float | None:
+        return self.accuracy["wer"] if self.accuracy else None
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -180,10 +141,78 @@ def run_faster_whisper(audio: np.ndarray, model_name: str = "large-v3") -> str:
     return " ".join(chunks).strip()
 
 
+def quietest_frame(
+    audio: np.ndarray,
+    target: int,
+    search_samples: int,
+    frame_ms: float = 20.0,
+) -> int:
+    """Return the sample offset near `target` that sits in the quietest
+    short frame within +/- `search_samples` — i.e. the least damaging
+    place to cut. Falls back to `target` when the window is too small."""
+    frame = max(1, int(frame_ms / 1000.0 * TARGET_SR))
+    lo = max(0, target - search_samples)
+    hi = min(len(audio) - frame, target + search_samples)
+    if hi - lo < frame:
+        return target
+    window = audio[lo:hi]
+    # Mean |x| per frame; the minimum is the closest thing to a pause in
+    # this neighbourhood.
+    usable = (window.size // frame) * frame
+    frames = np.abs(window[:usable]).reshape(-1, frame).mean(axis=1)
+    return lo + int(np.argmin(frames)) * frame + frame // 2
+
+
+def silence_aware_chunks(
+    audio: np.ndarray,
+    chunk_seconds: float = 30.0,
+    search_seconds: float = 4.0,
+    frame_ms: float = 20.0,
+) -> list[tuple[int, int]]:
+    """Split long audio into ~`chunk_seconds` windows that end in the
+    quietest spot nearby, and return (start, end) sample offsets.
+
+    Cutting on a fixed grid slices through the middle of utterances, and
+    NeMo simply drops the fragments on both sides — worth several words
+    per boundary, which is enough to flip a model ranking. Searching a
+    few seconds around each boundary for the lowest-energy frame moves
+    the cut into a pause instead."""
+    n = len(audio)
+    chunk = int(chunk_seconds * TARGET_SR)
+    if n <= chunk:
+        return [(0, n)]
+
+    frame = max(1, int(frame_ms / 1000.0 * TARGET_SR))
+    search = int(search_seconds * TARGET_SR)
+
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    while start < n:
+        target = start + chunk
+        if target >= n - frame:
+            bounds.append((start, n))
+            break
+
+        lo = max(start + chunk // 2, target - search)
+        hi = min(n - frame, target + search)
+        window = audio[lo:hi]
+        if window.size >= frame:
+            usable = (window.size // frame) * frame
+            frames = np.abs(window[:usable]).reshape(-1, frame).mean(axis=1)
+            cut = lo + int(np.argmin(frames)) * frame + frame // 2
+        else:
+            cut = target
+
+        bounds.append((start, cut))
+        start = cut
+    return bounds
+
+
 def run_nemo_asr(
     audio: np.ndarray,
     model_id: str,
     extra_transcribe_kwargs: dict | None = None,
+    chunk_seconds: float = 30.0,
 ) -> str:
     """Unified runner for Parakeet / Canary. Chunks the audio into short
     windows and transcribes each one individually — NeMo's default
@@ -211,54 +240,90 @@ def run_nemo_asr(
     except Exception:
         pass
 
-    chunk_seconds = 30.0
-    chunk_samples = int(chunk_seconds * TARGET_SR)
-    n_chunks = max(1, (len(audio) + chunk_samples - 1) // chunk_samples)
+    bounds = silence_aware_chunks(audio, chunk_seconds=chunk_seconds)
 
     texts: list[str] = []
     tmpdir = Path(tempfile.mkdtemp(prefix="nemo-bench-"))
-    try:
-        for i in range(n_chunks):
-            start = i * chunk_samples
-            end = min(len(audio), start + chunk_samples)
-            segment = audio[start:end]
-            if len(segment) < TARGET_SR // 10:
-                # Skip anything shorter than 100 ms — NeMo occasionally
-                # errors on micro-chunks at the end of the file.
-                continue
-            wav_path = tmpdir / f"chunk_{i:05d}.wav"
-            sf.write(str(wav_path), segment, TARGET_SR, subtype="PCM_16")
-            try:
-                result = model.transcribe(
-                    [str(wav_path)],
-                    batch_size=1,
-                    num_workers=0,
-                    verbose=False,
-                    **extra_kwargs,
-                )
-            except TypeError:
-                # Older NeMo versions don't accept num_workers/verbose kwargs.
-                # Still try with the model-specific extras (Canary's
-                # source_lang/target_lang are required, not optional).
-                result = model.transcribe(
-                    [str(wav_path)],
-                    batch_size=1,
-                    **extra_kwargs,
-                )
-            finally:
-                wav_path.unlink(missing_ok=True)
+    counter = itertools.count()
+    pad = np.zeros(int(NEMO_PAD_SECONDS * TARGET_SR), dtype=np.float32)
 
-            # NeMo returns list[str] or list[Hypothesis] depending on
-            # the model family + version. Normalise.
-            for r in result:
-                if isinstance(r, str):
-                    texts.append(r)
-                elif hasattr(r, "text"):
-                    texts.append(str(r.text))
-                elif isinstance(r, list) and r and hasattr(r[0], "text"):
-                    texts.append(str(r[0].text))
-                else:
-                    texts.append(str(r))
+    def transcribe_segment(segment: np.ndarray, depth: int = 0) -> str:
+        """Transcribe one window, retrying on an empty decode.
+
+        Canary is an attention-encoder-decoder model and occasionally
+        emits EOS immediately, returning an empty string for a window
+        that is plainly speech — a 10 s window came back empty while
+        both 8 s and 12 s of the same audio transcribed fine. Padding
+        the window with silence fixes some of those; splitting it in
+        half fixes most of the rest. Without this the empty windows
+        score as bulk deletions and we would be measuring our own
+        chunking rather than the model."""
+        if len(segment) < TARGET_SR // 10:
+            # Anything shorter than 100 ms carries no words and NeMo
+            # occasionally errors on such micro-chunks.
+            return ""
+
+        wav_path = tmpdir / f"chunk_{next(counter):05d}.wav"
+        sf.write(
+            str(wav_path),
+            np.concatenate([pad, segment, pad]),
+            TARGET_SR,
+            subtype="PCM_16",
+        )
+        try:
+            result = model.transcribe(
+                [str(wav_path)],
+                batch_size=1,
+                num_workers=0,
+                verbose=False,
+                **extra_kwargs,
+            )
+        except TypeError:
+            # Older NeMo versions don't accept num_workers/verbose kwargs.
+            # Still try with the model-specific extras (Canary's
+            # source_lang/target_lang are required, not optional).
+            result = model.transcribe(
+                [str(wav_path)],
+                batch_size=1,
+                **extra_kwargs,
+            )
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+        # NeMo returns list[str] or list[Hypothesis] depending on
+        # the model family + version. Normalise.
+        parts: list[str] = []
+        for r in result:
+            if isinstance(r, str):
+                parts.append(r)
+            elif hasattr(r, "text"):
+                parts.append(str(r.text))
+            elif isinstance(r, list) and r and hasattr(r[0], "text"):
+                parts.append(str(r[0].text))
+            else:
+                parts.append(str(r))
+        text = " ".join(p.strip() for p in parts).strip()
+
+        if text or depth >= NEMO_MAX_RETRY_DEPTH:
+            return text
+
+        # Empty decode: split at the quietest frame near the middle so
+        # neither half starts or ends mid-word, and try the halves.
+        middle = len(segment) // 2
+        split = quietest_frame(
+            segment,
+            middle,
+            search_samples=min(middle, int(1.0 * TARGET_SR)),
+        )
+        left = transcribe_segment(segment[:split], depth + 1)
+        right = transcribe_segment(segment[split:], depth + 1)
+        return " ".join(p for p in (left, right) if p).strip()
+
+    try:
+        for start, end in bounds:
+            text = transcribe_segment(audio[start:end])
+            if text:
+                texts.append(text)
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -270,30 +335,37 @@ def run_nemo_asr(
 
 MODEL_REGISTRY: dict[str, dict] = {
     "parakeet-live": {
-        # Reads OpenOats's own transcript.live.jsonl — the Parakeet v3
+        # Reads the recording app's own transcript.live.jsonl — the Parakeet v3
         # output the user actually sees in production. Avoids having to
         # reproduce the FluidAudio / Swift pipeline in Python (NeMo's
         # EncDecRNNTBPE wrapper for parakeet-tdt-0.6b-v3 multilingual
         # decoded to 0 tokens on our test audio). This is also a
         # "truer" comparison target: it's literally the output the
         # user is comparing Whisper / Canary against.
-        "kind": "openoats_live",
-        "label": "OpenOats live Parakeet-TDT v3 (as produced by the app)",
+        "kind": "live_transcript",
+        "label": "Live Parakeet-TDT v3 (as produced by the recording app)",
     },
     "canary": {
         "kind": "nemo",
         "nemo_id": "nvidia/canary-1b-flash",
         "label": "NVIDIA Canary-1B-Flash (multilingual: en/de/fr/es)",
+        # Canary silently drops material inside long windows — on a 29 s
+        # chunk it returned ~75% of the words, with whole utterances
+        # missing from the middle rather than the edges. Shorter windows
+        # trade a little context for output that actually covers the
+        # audio, without which its WER measures our chunking rather than
+        # the model.
+        "chunk_seconds": 15.0,
         # Canary is a Multi-Task model: without explicit language hints
-        # it auto-translates to English. For an honest ASR comparison on
-        # DE meetings we pin both source+target to German and request
-        # punctuation+capitalisation. Mixed-language utterances are a
-        # known weakness of this config — live Parakeet handles code-
-        # switching better, but this is the cleanest Canary-on-German
-        # baseline for the benchmark.
+        # it auto-translates to English, which would score as a total
+        # miss against a German reference. We pin source == target to the
+        # session language (transcribe, don't translate) and request
+        # punctuation + capitalisation. `{lang}` is substituted from
+        # session.json at run time; it falls back to English for recorded
+        # sessions that carry no manifest.
         "nemo_transcribe_kwargs": {
-            "source_lang": "de",
-            "target_lang": "de",
+            "source_lang": "{lang}",
+            "target_lang": "{lang}",
             "pnc": "yes",
             "task": "asr",
         },
@@ -306,8 +378,8 @@ MODEL_REGISTRY: dict[str, dict] = {
 }
 
 
-def run_openoats_live(session_dir: Path, channel: str) -> str:
-    """Extract the Parakeet-v3 output from OpenOats's own
+def run_live_transcript(session_dir: Path, channel: str) -> str:
+    """Extract the Parakeet-v3 output from the recording app's own
     `transcript.live.jsonl` and split it by speaker so we can line it up
     against model output for the `mic` vs `sys` channels separately.
 
@@ -339,7 +411,7 @@ def run_openoats_live(session_dir: Path, channel: str) -> str:
             continue
         speaker = rec.get("speaker")
         # Speaker is serialised as either "you" or a dict like
-        # {"them": null} / {"remote": 1} depending on OpenOats version.
+        # {"them": null} / {"remote": 1} depending on app version.
         if speaker == "you" or (isinstance(speaker, dict) and "you" in speaker):
             is_mic = True
         else:
@@ -355,11 +427,24 @@ def run_openoats_live(session_dir: Path, channel: str) -> str:
     return " ".join(mic_parts if channel == "mic" else sys_parts).strip()
 
 
+def resolve_kwargs(kwargs: dict | None, language: str) -> dict | None:
+    """Substitute `{lang}` placeholders in a model's transcribe kwargs with
+    the session language, so one registry entry works for any language."""
+    if not kwargs:
+        return kwargs
+    lang = (language or "en").split("-")[0].split("_")[0].lower()
+    return {
+        k: (v.format(lang=lang) if isinstance(v, str) else v)
+        for k, v in kwargs.items()
+    }
+
+
 def run_model(
     model_key: str,
     audio: np.ndarray,
     session_dir: Path,
     channel: str,
+    language: str = "en",
 ) -> tuple[str, str | None]:
     """Dispatch on the registry. Returns (text, error). Any exception is
     caught so one broken runtime doesn't kill the rest of the matrix."""
@@ -371,14 +456,82 @@ def run_model(
             return run_nemo_asr(
                 audio,
                 cfg["nemo_id"],
-                extra_transcribe_kwargs=cfg.get("nemo_transcribe_kwargs"),
+                extra_transcribe_kwargs=resolve_kwargs(
+                    cfg.get("nemo_transcribe_kwargs"), language
+                ),
+                chunk_seconds=cfg.get("chunk_seconds", 30.0),
             ), None
-        elif cfg["kind"] == "openoats_live":
-            return run_openoats_live(session_dir, channel), None
+        elif cfg["kind"] == "live_transcript":
+            return run_live_transcript(session_dir, channel), None
         else:
             raise ValueError(f"Unknown kind: {cfg['kind']}")
     except Exception as exc:
         return "", f"{type(exc).__name__}: {exc}"
+
+
+# ──────────────────────────────────────────────
+# Session loading
+# ──────────────────────────────────────────────
+
+AUDIO_EXTS = (".wav", ".caf", ".flac", ".m4a", ".mp3", ".aiff", ".aif", ".ogg", ".opus")
+
+
+@dataclass
+class Session:
+    """A directory of audio to benchmark, plus whatever ground truth it
+    happens to carry. Synthetic sessions (synth.py) have references;
+    recorded ones generally don't, and everything downstream is written
+    to degrade gracefully in that case."""
+
+    path: Path
+    language: str
+    channels: dict[str, Path]           # channel name → audio file
+    references: dict[str, str]          # channel name → reference text
+    manifest: dict
+
+    @property
+    def has_reference(self) -> bool:
+        return bool(self.references)
+
+
+def load_session(session_dir: Path) -> Session:
+    """Discover channels and ground truth in a session directory.
+
+    A `session.json` manifest (written by synth.py) is authoritative for
+    language and channel order; without one we fall back to globbing
+    `audio/`, which keeps plain recorded sessions working."""
+    audio_dir = session_dir / "audio"
+    if not audio_dir.is_dir():
+        raise FileNotFoundError(f"No audio/ directory under {session_dir}")
+
+    manifest: dict = {}
+    manifest_path = session_dir / "session.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    channels: dict[str, Path] = {}
+    for f in sorted(audio_dir.iterdir()):
+        if f.is_file() and f.suffix.lower() in AUDIO_EXTS:
+            channels[f.stem] = f
+
+    if not channels:
+        raise FileNotFoundError(f"No audio files found in {audio_dir}")
+
+    references: dict[str, str] = {}
+    ref_dir = session_dir / "reference"
+    if ref_dir.is_dir():
+        for name in channels:
+            ref_file = ref_dir / f"{name}.txt"
+            if ref_file.exists():
+                references[name] = ref_file.read_text(encoding="utf-8").strip()
+
+    return Session(
+        path=session_dir,
+        language=str(manifest.get("language", "en")),
+        channels=channels,
+        references=references,
+        manifest=manifest,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -392,47 +545,71 @@ def main() -> int:
         "--session",
         type=Path,
         required=True,
-        help="OpenOats session directory (contains audio/mic.caf + audio/sys.caf).",
+        help="Session directory containing an audio/ folder. Synthetic "
+             "sessions from synth.py also carry reference/ for WER scoring.",
     )
     ap.add_argument(
         "--models",
         nargs="+",
-        default=list(MODEL_REGISTRY.keys()),
+        default=[k for k in MODEL_REGISTRY if k != "parakeet-live"],
         choices=list(MODEL_REGISTRY.keys()),
-        help="Which models to run. Default: all.",
+        help="Which models to run. Default: all real ASR models "
+             "(`parakeet-live` only applies to app-recorded sessions).",
     )
     ap.add_argument(
         "--channels",
         nargs="+",
-        default=["mic", "sys"],
-        choices=["mic", "sys"],
-        help="Which channels to transcribe. Default: both.",
+        default=None,
+        help="Channel names to transcribe (file stems under audio/). "
+             "Default: every channel in the session.",
+    )
+    ap.add_argument(
+        "--language",
+        default=None,
+        help="Override the session language hint (affects Canary and WER "
+             "number normalisation).",
     )
     ap.add_argument(
         "--run-name",
-        default=time.strftime("%Y-%m-%d_%H-%M-%S"),
-        help="Sub-directory under runs/ where outputs are written.",
+        default=None,
+        help="Sub-directory under runs/. Default: <session>_<timestamp>.",
     )
     args = ap.parse_args()
 
     session_dir: Path = args.session.expanduser().resolve()
-    audio_dir = session_dir / "audio"
-    if not audio_dir.is_dir():
-        console.print(f"[red]No audio/ under {session_dir}[/red]")
+    try:
+        session = load_session(session_dir)
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        console.print(f"[red]{exc}[/red]")
         return 1
 
-    run_dir = Path(__file__).resolve().parent / "runs" / args.run_name
+    language = args.language or session.language
+    run_name = args.run_name or f"{session_dir.name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+    run_dir = Path(__file__).resolve().parent / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pre-load both channels once so we amortise the read cost.
+    selected = args.channels or list(session.channels)
+    unknown = [c for c in selected if c not in session.channels]
+    if unknown:
+        console.print(
+            f"[red]Unknown channel(s): {', '.join(unknown)}. "
+            f"Available: {', '.join(session.channels)}[/red]"
+        )
+        return 1
+
+    console.print(
+        f"[bold]Session[/bold] {session_dir.name}  "
+        f"(lang={language}, channels={', '.join(selected)}, "
+        f"reference={'yes' if session.has_reference else 'no'})"
+    )
+
+    # Pre-load every channel once so we amortise the decode cost across
+    # all models in the matrix.
     channel_audio: dict[str, np.ndarray] = {}
-    for ch in args.channels:
-        caf = audio_dir / f"{ch}.caf"
-        if not caf.exists():
-            console.print(f"[yellow]Skipping {ch}: {caf} missing[/yellow]")
-            continue
-        console.print(f"[cyan]Loading[/cyan] {ch}.caf ({caf.stat().st_size / 1e6:.1f} MB)…")
-        channel_audio[ch] = load_mono_16k(caf)
+    for ch in selected:
+        path = session.channels[ch]
+        console.print(f"[cyan]Loading[/cyan] {path.name} ({path.stat().st_size / 1e6:.1f} MB)…")
+        channel_audio[ch] = load_mono_16k(path)
         console.print(f"  → {len(channel_audio[ch]) / TARGET_SR:.1f}s at 16 kHz mono")
 
     results: list[ModelRun] = []
@@ -447,11 +624,15 @@ def main() -> int:
             console.print(f"\n[bold magenta]▶ {model_key} / {ch}[/bold magenta]")
             start = time.perf_counter()
             rss_before = peak_rss_mb()
-            text, err = run_model(model_key, audio, session_dir, ch)
+            text, err = run_model(model_key, audio, session_dir, ch, language)
             wall = time.perf_counter() - start
             rss_after = peak_rss_mb()
 
             audio_seconds = len(audio) / TARGET_SR
+            accuracy = None
+            if ch in session.references and not err:
+                accuracy = score_transcript(text, session.references[ch], language)
+
             run = ModelRun(
                 model_id=model_key,
                 channel=ch,
@@ -461,44 +642,67 @@ def main() -> int:
                 peak_rss_mb=max(rss_before, rss_after),
                 text=text,
                 error=err,
+                accuracy=accuracy,
             )
             results.append(run)
 
             out_path.write_text(text or "", encoding="utf-8")
-            metrics_path.write_text(json.dumps(run.to_json(), indent=2, ensure_ascii=False), encoding="utf-8")
+            metrics_path.write_text(
+                json.dumps(run.to_json(), indent=2, ensure_ascii=False), encoding="utf-8"
+            )
 
             if err:
                 console.print(f"[red]  {err}[/red]")
             else:
+                wer_note = f" · WER {accuracy['wer']:.1%}" if accuracy else ""
                 console.print(
                     f"  [green]done[/green] in {wall:.1f}s  "
                     f"(RTF {run.rtf:.2f} · "
                     f"{len(text.split())} words · "
-                    f"peak RSS {run.peak_rss_mb:.0f} MB)"
+                    f"peak RSS {run.peak_rss_mb:.0f} MB{wer_note})"
                 )
 
-    # Summary table
+    # Summary table — WER columns only appear when the session has ground
+    # truth, so recorded sessions don't get a wall of dashes.
     console.print()
-    table = Table(title=f"Bench summary — run {args.run_name}")
+    table = Table(title=f"Bench summary — run {run_name}")
     table.add_column("Model")
     table.add_column("Channel")
     table.add_column("Audio", justify="right")
     table.add_column("Wall", justify="right")
     table.add_column("RTF", justify="right")
+    if session.has_reference:
+        table.add_column("WER", justify="right")
+        table.add_column("CER", justify="right")
     table.add_column("Words", justify="right")
     table.add_column("Peak RSS", justify="right")
     table.add_column("Error")
-    for r in results:
-        table.add_row(
+
+    # Best WER first: the ranking is the point of the whole exercise.
+    ordered = sorted(
+        results,
+        key=lambda r: (r.channel, r.wer if r.wer is not None else float("inf")),
+    ) if session.has_reference else results
+
+    for r in ordered:
+        row = [
             r.model_id,
             r.channel,
             f"{r.audio_seconds:.0f}s",
             f"{r.wall_seconds:.1f}s",
             f"{r.rtf:.2f}",
+        ]
+        if session.has_reference:
+            row += [
+                f"{r.accuracy['wer']:.1%}" if r.accuracy else "—",
+                f"{r.accuracy['cer']:.1%}" if r.accuracy else "—",
+            ]
+        row += [
             str(len((r.text or "").split())),
             f"{r.peak_rss_mb:.0f} MB",
             r.error or "",
-        )
+        ]
+        table.add_row(*row)
     console.print(table)
 
     summary_path = run_dir / "summary.json"
@@ -506,7 +710,26 @@ def main() -> int:
         json.dumps([r.to_json() for r in results], indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    # Snapshot what was benchmarked so a run directory stays interpretable
+    # after the session is regenerated or deleted.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_name": run_name,
+                "session": str(session_dir),
+                "language": language,
+                "models": list(args.models),
+                "channels": selected,
+                "has_reference": session.has_reference,
+                "session_manifest": session.manifest,
+                "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            },
+            indent=2, ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     console.print(f"\nOutputs in [bold]{run_dir}[/bold]")
+    console.print(f"Report:  uv run python compare.py --run-name {run_name}")
     return 0
 
 
