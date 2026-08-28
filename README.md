@@ -263,6 +263,11 @@ The honest rule is the weaker one: compare models within an engine, and treat a
 result that only holds on one engine as a property of that engine until it is
 shown on another.
 
+On German the effect is not weak at all. `whisper-large-v3` is first of six on
+`say` and fifth on `piper`, while both Canary models improve by 7–8 points going
+the other way — a genuine reordering, not just a shift in absolute WER. See the
+German table in the results section.
+
 The axis is not specific to transcription. Diarisation shows the same thing more
 violently — `sortformer` scores 36.6 % DER on `standup-de__say__clean` and 1.0 %
 on the same script under `piper`. See the diarisation results below.
@@ -441,17 +446,42 @@ same split more sharply — 2.4 % against 7.9 %. A CER that high next to that WE
 means the errors are not scattered word substitutions but systematic formatting
 differences, most of them in how numbers and identifiers get written out.
 
-**German** — `standup-de`, 94 s, 3 speakers, 226 reference words. These figures
-predate the rate fix and are stale; the German re-measure is issue #7.
+**German** — `standup-de__clean`, 94 s, 3 speakers, 226 reference words. Only six
+models claim German. The `piper` column is the same script under the other
+engine:
 
-| Model | Wall clock | RTF | Peak RSS | WER | CER |
-|---|---:|---:|---:|---:|---:|
-| parakeet-tdt-v3 | 19 s | 0.20 | 5.5 GB | **7.1 %** | 3.3 % |
-| whisper-large-v3 | 94 s | 1.00 | 4.1 GB | 7.5 % | 3.8 % |
-| whisper-large-v3-turbo | 43 s | 0.46 | 2.5 GB | 8.4 % | 3.1 % |
-| canary-1b-v2 | 42 s | 0.45 | 9.4 GB | 10.2 % | 4.2 % |
-| canary | 34 s | 0.37 | 7.1 GB | 20.3 % | 17.0 % |
-| canary-180m-flash | 19 s | 0.20 | 2.6 GB | 23.4 % | 20.7 % |
+| Model | Wall clock | RTF | Peak RSS | WER (`say`) | CER (`say`) | WER (`piper`) |
+|---|---:|---:|---:|---:|---:|---:|
+| whisper-large-v3 | 155 s | 1.65 | 4.0 GB | **5.8 %** | 2.8 % | 13.3 % |
+| whisper-large-v3-turbo | 104 s | 1.11 | 2.4 GB | 6.2 % | 2.3 % | **9.3 %** |
+| parakeet-tdt-v3 | 28 s | 0.30 | 5.3 GB | 7.5 % | 3.6 % | 10.2 % |
+| canary-1b-v2 | 70 s | 0.75 | 7.8 GB | 10.2 % | 4.2 % | 9.7 % |
+| canary | 47 s | 0.51 | 7.2 GB | 20.3 % | 17.1 % | 12.4 % |
+| canary-180m-flash | 28 s | 0.29 | 2.2 GB | 23.4 % | 20.5 % | 15.9 % |
+
+**German is where the engine genuinely reorders the ranking.** `whisper-large-v3`
+is first on `say` and fifth of six on `piper`, losing 7.5 points; both Canary
+models go the other way and *gain* 8 and 7.5. This is a much larger effect than
+the English table shows, and it is the concrete reason the engine is an axis
+rather than a footnote. Read it with the caveat in the TTS section: the German
+Piper voices are unevenly trained, so part of this is voice quality rather than
+model behaviour, and the direction of the effect is trustworthy while the
+magnitude is not.
+
+**What breaks Canary on German is what the script was built to break.** Its
+errors are concentrated in English loanwords and spoken numbers — `Backend`
+becomes *Wacken*, `Deployment` becomes *Dokumentarfilm*, and where the reference
+says "ungefähr hundertzwanzig Millisekunden" Canary emits "ungefähr
+Millisekunden", deleting the quantity outright. Of the 23 number-words in the
+reference, `canary` keeps 15 and `canary-180m-flash` keeps 9, neither producing a
+single digit; Whisper and Parakeet write 19 digit characters instead, which score
+as correct because `score.py` normalises `120` against *hundertzwanzig*. That
+ordering — 9, 15, then digits — tracks the WER column exactly.
+
+The CER column is the tell. A model at 20 % WER and 3 % CER is getting words
+slightly wrong; one at 20 % WER and 17 % CER is dropping content. That is worth
+more than the WER ranking, because a transcript missing its numbers fails
+differently from one that misspells them.
 
 Diarisation, same sessions plus a deliberately overlap-heavy one:
 
