@@ -420,7 +420,10 @@ took up to 6 WER points off nine of thirteen models, and collapsed the apparent
 structure of the whole table — including the cross-engine rank correlation that
 had been quoted as evidence the ranking was stable.
 
-`test_score.py` pins all of this down; run it with `python test_score.py`.
+`test_score.py` pins all of this down; run it with `python test_score.py`. When a
+rule changes, `uv run python rescore.py --dry-run` shows which stored results the
+change would move — the decoded text lives in `summary.json`, so correcting the
+whole result history costs seconds and no GPU.
 
 
 `score.py` has no third-party dependency — it ships its own Levenshtein alignment and a German/English number speller. If you install [`jiwer`](https://pypi.org/project/jiwer/) and [`num2words`](https://pypi.org/project/num2words/) yourself, it picks them up automatically for the reference implementation and wider language coverage:
@@ -666,6 +669,8 @@ A full 8-model matrix on a 90-second session takes roughly 10 minutes. Longer se
 | `bench.py` | runs the model × channel matrix, scores against the reference |
 | `diarize.py` | speaker diarisation backends, scored as DER |
 | `score.py` | normalisation + WER/CER alignment + DER |
+| `test_score.py` | regression tests for the normalisation rules |
+| `rescore.py` | re-scores stored transcripts after a `score.py` change, no model runs |
 | `compare.py` | run directory → Markdown report |
 | `audio_io.py` | shared decode/encode helpers (ffmpeg + libsndfile) |
 | `envfile.py` | loads `.env` before torch/NeMo import, so caches land where you asked |
