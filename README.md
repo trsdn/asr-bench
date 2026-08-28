@@ -418,6 +418,52 @@ Diarisation, same sessions plus a deliberately overlap-heavy one:
 | sortformer-streaming | **1.5 % DER** | 1.7 % DER | 14.7 % DER |
 | titanet | 26.0 % DER | 8.8 % DER | 33.7 % DER |
 
+### Diarisation does not degrade, it collapses
+
+Taking a single column of that table at face value is a mistake. Running all
+three backends over two TTS engines × six degradation profiles — 14 cells each —
+gives a distribution with a hole in the middle:
+
+| Backend | DER < 5 % | 5–15 % | > 15 % | Sorted values |
+|---|---:|---:|---:|---|
+| sortformer | 11 | 0 | 3 | 0.0 … 1.0, then 27.6 / 36.6 / 59.9 |
+| sortformer-streaming | 8 | 1 | 5 | 0.0 … 6.5, then 15.8 … 32.6 |
+| titanet | 2 | 5 | 7 | 1.9 … 7.5, then 25.4 … 34.5 |
+
+Sortformer v1 has nothing at all between 1.0 % and 27.6 %. It either separates
+the speakers essentially perfectly or fails outright, and the mean of those two
+states describes no run that ever happened. The number worth reporting for a
+diarisation backend on this data is therefore how often it collapses, not its
+average DER.
+
+**Every collapse is the same failure.** In 14 of the 15 cells above 15 %, two
+reference speakers are fused into one cluster of 49–84 s, and a sub-second
+phantom (0.4 s, 1.0 s, 1.5 s, 1.6 s …) holds the slot that the second speaker
+should have occupied. Against a reference of 33.8 / 30.3 / 21.0 s, the failures
+look like `[62.2, 21.3, 0.4]` or `[83.8]`. Checking the hypothesis speakers for
+one implausibly short cluster identifies the failure immediately, and is a far
+better diagnostic than the DER itself.
+
+**Audio quality does not predict it.** This was originally filed as "clean audio
+diarises worse than degraded", which held on `say` — 36.6 % clean against 0.0 %
+on five separate degradation profiles. It does not survive a second engine:
+
+| Profile | say | piper |
+|---|---:|---:|
+| clean | 36.6 % | **1.0 %** |
+| noisy | **0.0 %** | 0.7 % |
+| phone | **0.0 %** | 0.9 % |
+| farfield | **0.0 %** | 0.2 % |
+| clipped | 59.9 % | **0.7 %** |
+| worst-case | **0.3 %** | 27.6 % |
+
+The two engines fail on disjoint profiles. Whatever tips a session into the
+collapsed state is a property of the specific voices and the specific
+distortion together, not of how degraded the audio is — so a diarisation result
+measured on one TTS engine says nothing about the same backend on another. This
+is the same lesson the transcription side produced, and it is the argument for
+carrying the engine as an axis rather than a footnote.
+
 **Overlapping speech** — `crosstalk-de`, 71 s, 4 speakers, 6.6 s (9.3 %) of genuinely simultaneous speech:
 
 | Backend | Overlap DER | Miss | Confusion | Detection recall |
@@ -447,7 +493,7 @@ Several things in those tables are worth more than the ranking itself.
 
 **whisper-large-v3 degenerates on the English session** — 43.9 % WER from 90 insertions, and an RTF of 3.42 rather than the 0.5 it manages elsewhere. The transcript is correct up to the last real words ("Thanks for calling.") and then invents about 78 more, ending in *"I love you too... I love you..."*. This is the well-known Whisper trailing-silence loop: the decoder is autoregressive, so once it starts a repetition it will happily continue and burn wall-clock doing it. `whisper-large-v3-turbo` on the identical audio stops cleanly. The repeated-n-gram column in the report flags it automatically — this is exactly the failure the heuristic exists for, and exactly the failure a transducer like Parakeet cannot have by construction.
 
-**A phantom speaker costs a real one.** On `standup-de` the reference is three speakers of 33.8 s, 30.3 s and 21.0 s. `sortformer` v1 returns 62.2 s, 0.4 s and 21.1 s — the 0.4 s cluster occupies a speaker slot, so the two largest speakers are merged into one. `titanet` produces the same 0.4 s fragment and the same merge. `sortformer-streaming` returns 33.7 s / 29.0 s / 21.0 s and scores 1.5 %. The failure is not that the voices are hard to tell apart, it is that a sub-second fragment is allowed to hold a slot; when it doesn't, the same audio separates almost perfectly. Checking the hypothesis speakers for one implausibly short cluster is the fastest diagnostic available, and it caught the same thing on `crosstalk-de/titanet` (1.5 s and 0.6 s fragments alongside a 38.8 s merge).
+**A phantom speaker costs a real one.** On `standup-de` the reference is three speakers of 33.8 s, 30.3 s and 21.0 s. `sortformer` v1 returns 62.2 s, 0.4 s and 21.1 s — the 0.4 s cluster occupies a speaker slot, so the two largest speakers are merged into one. `titanet` produces the same 0.4 s fragment and the same merge. `sortformer-streaming` returns 33.7 s / 29.0 s / 21.0 s and scores 1.5 %. The failure is not that the voices are hard to tell apart, it is that a sub-second fragment is allowed to hold a slot; when it doesn't, the same audio separates almost perfectly. Checking the hypothesis speakers for one implausibly short cluster is the fastest diagnostic available, and it caught the same thing on `crosstalk-de/titanet` (1.5 s and 0.6 s fragments alongside a 38.8 s merge). Measured across 42 cells it is not an anecdote but the failure mode: see the collapse table above, where it accounts for 14 of 15 failures.
 
 An earlier version of this README explained the German diarisation gap as macOS `say` voices sitting too close together in embedding space. That was wrong. The voices are separable — `sortformer-streaming` separates them at 1.5 % DER, and auto-detect clustering separates them at 0.5 % confusion. The measurement that seemed to support it (between-speaker cosine distance 0.71–0.92 vs. 0.14–0.38 within) was real but did not explain the errors.
 
