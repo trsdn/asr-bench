@@ -327,6 +327,84 @@ def run_nemo_asr(
     return " ".join(t.strip() for t in texts).strip()
 
 
+def run_salm(
+    audio: np.ndarray,
+    model_id: str,
+    chunk_seconds: float = 30.0,
+) -> str:
+    """Canary-Qwen and friends: a speech encoder feeding an LLM decoder.
+
+    NeMo exposes these through `SALM`, not `ASRModel` — loading one with
+    `ASRModel.from_pretrained` fails looking for a `model_config.yaml`
+    that a SALM checkpoint does not have. The task comes from a prompt
+    rather than the architecture, which is the whole point of the design
+    and also its risk: an LLM decoder can produce fluent text that owes
+    nothing to the audio."""
+    from nemo.collections.speechlm2.models import SALM
+    import tempfile
+
+    model = SALM.from_pretrained(model_id)
+    model.eval()
+
+    bounds = silence_aware_chunks(audio, chunk_seconds=chunk_seconds)
+    tmpdir = Path(tempfile.mkdtemp(prefix="salm-bench-"))
+    pad = np.zeros(int(NEMO_PAD_SECONDS * TARGET_SR), dtype=np.float32)
+
+    texts: list[str] = []
+    try:
+        for index, (start, end) in enumerate(bounds):
+            segment = np.concatenate([pad, audio[start:end], pad])
+            wav = tmpdir / f"chunk-{index}.wav"
+            sf.write(str(wav), segment, TARGET_SR, subtype="PCM_16")
+            answer = model.generate(
+                prompts=[
+                    [
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Transcribe the following: "
+                                f"{model.audio_locator_tag}"
+                            ),
+                            "audio": [str(wav)],
+                        }
+                    ]
+                ],
+                max_new_tokens=256,
+            )
+            texts.append(model.tokenizer.ids_to_text(answer[0].cpu()).strip())
+            wav.unlink(missing_ok=True)
+    finally:
+        try:
+            tmpdir.rmdir()
+        except OSError:
+            pass
+        del model
+        gc.collect()
+
+    return " ".join(t for t in texts if t).strip()
+
+
+def run_hf_model(
+    audio: np.ndarray,
+    model_id: str,
+    family: str,
+    language: str = "en",
+    chunk_seconds: float = 30.0,
+    device: str | None = None,
+) -> str:
+    """Bridge to `hf_runners`. Chunking stays here so every model in the
+    matrix sees the same windowing policy."""
+    from hf_runners import run_hf
+
+    bounds = silence_aware_chunks(audio, chunk_seconds=chunk_seconds)
+    pad = np.zeros(int(NEMO_PAD_SECONDS * TARGET_SR), dtype=np.float32)
+    chunks = [
+        np.concatenate([pad, audio[start:end], pad]) for start, end in bounds
+    ]
+    texts = run_hf(chunks, model_id, family, language=language, device=device)
+    return " ".join(t for t in texts if t).strip()
+
+
 MODEL_REGISTRY: dict[str, dict] = {
     # `languages` lists the languages a model actually supports. English-only
     # models scored against a German session produce nonsense that looks like
@@ -401,6 +479,83 @@ MODEL_REGISTRY: dict[str, dict] = {
         "languages": {"en"},
         "chunk_seconds": 30.0,
     },
+    "parakeet-ctc-1.1b": {
+        "kind": "nemo",
+        "nemo_id": "nvidia/parakeet-ctc-1.1b",
+        # Same family as the TDT models but a plain CTC head instead of a
+        # transducer, which isolates the decoder choice: CTC assumes
+        # conditional independence between output frames, so it has no
+        # internal language model to lean on — and no way to loop either.
+        "label": "NVIDIA Parakeet-CTC 1.1B (CTC head, English only)",
+        "languages": {"en"},
+        "chunk_seconds": 30.0,
+    },
+    "canary-qwen-2.5b": {
+        "kind": "salm",
+        "nemo_id": "nvidia/canary-qwen-2.5b",
+        # A speech-augmented language model: Canary encoder bolted onto a
+        # Qwen LLM decoder. Worth having because it is the one NeMo model
+        # here whose decoder is a general-purpose LLM, which is exactly
+        # the design that can hallucinate fluent text over bad audio.
+        "label": "NVIDIA Canary-Qwen 2.5B (SALM, LLM decoder, English only)",
+        "languages": {"en"},
+        "chunk_seconds": 30.0,
+    },
+    "moonshine-base": {
+        "kind": "hf",
+        "hf_id": "UsefulSensors/moonshine-base",
+        "hf_family": "seq2seq",
+        # 200 MB against Whisper-large's 3 GB. Here to establish the
+        # floor: how much accuracy does the smallest credible model
+        # actually give up?
+        "label": "Moonshine Base (61M params, English only)",
+        "languages": {"en"},
+        "chunk_seconds": 30.0,
+    },
+    "kyutai-stt-2.6b": {
+        "kind": "hf",
+        "hf_id": "kyutai/stt-2.6b-en-trfs",
+        "hf_family": "seq2seq",
+        "label": "Kyutai STT 2.6B (streaming architecture, English only)",
+        "languages": {"en"},
+        "chunk_seconds": 30.0,
+    },
+    "granite-speech-4.1": {
+        "kind": "hf",
+        "hf_id": "ibm-granite/granite-speech-4.1-2b",
+        "hf_family": "audio-llm",
+        "label": "IBM Granite Speech 4.1 2B (2026)",
+        "languages": {"en"},
+        "chunk_seconds": 30.0,
+    },
+    "qwen2-audio-7b": {
+        "kind": "hf",
+        "hf_id": "Qwen/Qwen2-Audio-7B-Instruct",
+        "hf_family": "audio-llm",
+        "label": "Qwen2-Audio 7B Instruct (audio LLM)",
+        "languages": None,
+        "chunk_seconds": 30.0,
+    },
+    "voxtral-mini-3b": {
+        "kind": "hf",
+        "hf_id": "mistralai/Voxtral-Mini-3B-2507",
+        "hf_family": "voxtral",
+        "label": "Mistral Voxtral Mini 3B (2025)",
+        "languages": None,
+        "chunk_seconds": 30.0,
+        # MPS deadlocks on this one: the process parks forever inside a
+        # Metal command buffer instead of raising, so it looks like a very
+        # slow run rather than a failure. CPU is slower but finishes.
+        "device": "cpu",
+    },
+    "phi-4-multimodal": {
+        "kind": "hf",
+        "hf_id": "microsoft/Phi-4-multimodal-instruct",
+        "hf_family": "phi4",
+        "label": "Microsoft Phi-4 Multimodal (audio + text)",
+        "languages": None,
+        "chunk_seconds": 30.0,
+    },
     "whisper-large-v3": {
         "kind": "whisper",
         "fw_id": "large-v3",
@@ -462,6 +617,21 @@ def run_model(
                     cfg.get("nemo_transcribe_kwargs"), language
                 ),
                 chunk_seconds=cfg.get("chunk_seconds", 30.0),
+            ), None
+        elif cfg["kind"] == "salm":
+            return run_salm(
+                audio,
+                cfg["nemo_id"],
+                chunk_seconds=cfg.get("chunk_seconds", 30.0),
+            ), None
+        elif cfg["kind"] == "hf":
+            return run_hf_model(
+                audio,
+                cfg["hf_id"],
+                cfg["hf_family"],
+                language=lang,
+                chunk_seconds=cfg.get("chunk_seconds", 30.0),
+                device=cfg.get("device"),
             ), None
         else:
             raise ValueError(f"Unknown kind: {cfg['kind']}")

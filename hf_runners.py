@@ -1,0 +1,370 @@
+"""Transcription runners for models that load through `transformers`.
+
+NeMo and faster-whisper each expose one uniform API, which is why their
+runners live in `bench.py` as a single function apiece. The HuggingFace
+side is not uniform at all: an audio LLM wants a chat template with an
+audio placeholder, an encoder-decoder wants a feature tensor, and Voxtral
+wants its own bespoke request builder. Pretending otherwise would mean a
+runner full of special cases, so each family gets its own small function
+and they share only the chunk loop.
+
+Every runner has the same shape:
+
+    fn(chunks: list[np.ndarray], model_id: str, language: str) -> list[str]
+
+The caller does the chunking, so windowing policy stays in one place and
+this module never imports `bench`.
+
+Long audio has to be chunked here for the same reason it is chunked for
+NeMo: these are all 30-second-context encoders at heart, and an audio LLM
+asked to transcribe two minutes in one pass will summarise rather than
+transcribe.
+"""
+
+from __future__ import annotations
+
+import gc
+
+import numpy as np
+
+SAMPLE_RATE = 16_000
+
+# Audio LLMs are told what to do in words rather than by architecture, so
+# the instruction is part of the configuration. Kept deliberately blunt:
+# anything resembling "summarise" or "answer" invites the model to do
+# that instead, which scores as a catastrophic deletion rate.
+TRANSCRIBE_PROMPT = (
+    "Transcribe this audio exactly as spoken. Output only the transcript, "
+    "with no commentary, translation or summary."
+)
+
+
+def _torch():
+    import torch
+
+    return torch
+
+
+def _device_and_dtype(override: str | None = None):
+    """Apple Silicon: MPS where it works, float32 because half precision
+    is patchy across these architectures on Metal and a wrong dtype shows
+    up as silent garbage output rather than an exception.
+
+    Some models deadlock on MPS rather than failing — Voxtral parks in a
+    Metal command buffer that never completes, which looks like a very
+    slow run instead of a bug. Those get `device: "cpu"` in the registry,
+    and `ASR_BENCH_DEVICE` overrides everything for one-off debugging."""
+    import os
+
+    torch = _torch()
+    choice = override or os.environ.get("ASR_BENCH_DEVICE")
+    if choice:
+        return choice, torch.float32
+    if torch.backends.mps.is_available():
+        return "mps", torch.float32
+    return "cpu", torch.float32
+
+
+def _release(*objects) -> None:
+    for obj in objects:
+        del obj
+    gc.collect()
+    torch = _torch()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
+def _expected_sample_rate(processor, default: int = SAMPLE_RATE) -> int:
+    """The rate a model was trained on, read off its own processor.
+
+    Not every speech model wants 16 kHz — Kyutai STT is trained at 24 kHz
+    and refuses anything else. Asking the processor rather than keeping a
+    table in the registry means a new model cannot silently be fed the
+    wrong rate, which degrades output without raising anything."""
+    extractor = getattr(processor, "feature_extractor", processor)
+    return int(getattr(extractor, "sampling_rate", None) or default)
+
+
+def _resample(chunk: np.ndarray, target_sr: int) -> np.ndarray:
+    """Sessions are stored at 16 kHz; resample only when a model needs
+    something else."""
+    if target_sr == SAMPLE_RATE:
+        return chunk
+    import librosa
+
+    return librosa.resample(
+        chunk.astype(np.float32), orig_sr=SAMPLE_RATE, target_sr=target_sr
+    )
+
+
+def run_seq2seq(
+    chunks: list[np.ndarray],
+    model_id: str,
+    language: str = "en",
+    device: str | None = None,
+) -> list[str]:
+    """Plain speech-to-text encoder-decoders: Moonshine, Kyutai STT.
+
+    Same shape as Whisper — feature extractor in, token ids out — so one
+    function covers both."""
+    torch = _torch()
+    from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+    device, dtype = _device_and_dtype(device)
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, dtype=dtype)
+    model.to(device).eval()
+    sample_rate = _expected_sample_rate(processor)
+
+    texts: list[str] = []
+    for chunk in chunks:
+        # `audio=` by keyword, never positionally: Kyutai's processor uses
+        # the generic multimodal signature whose first argument is
+        # `images`, so a positional call silently passes no audio and the
+        # model then fails deep inside generate.
+        inputs = processor(
+            audio=_resample(chunk, sample_rate),
+            sampling_rate=sample_rate,
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            ids = model.generate(**inputs, max_new_tokens=440)
+        texts.append(
+            processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
+        )
+
+    _release(model, processor)
+    return texts
+
+
+def _load_generative_model(model_id: str, dtype):
+    """Pick the AutoModel class that actually claims this architecture.
+
+    The audio-LLM families disagree about which head they register under:
+    Granite Speech is a speech-seq2seq, Qwen2-Audio and Voxtral are
+    seq2seq LMs, Phi-4 is a causal LM. Trying them in order is more
+    robust than a hand-maintained table, and a wrong guess raises a
+    ValueError rather than loading something subtly wrong."""
+    import transformers
+
+    candidates = (
+        "AutoModelForSpeechSeq2Seq",
+        "AutoModelForSeq2SeqLM",
+        "AutoModelForCausalLM",
+    )
+    last_error: Exception | None = None
+    for name in candidates:
+        try:
+            return getattr(transformers, name).from_pretrained(model_id, dtype=dtype)
+        except ValueError as error:
+            last_error = error
+    raise last_error  # type: ignore[misc]
+
+
+def _is_granite(processor) -> bool:
+    return type(processor).__name__.startswith("GraniteSpeech")
+
+
+def _audio_llm_prompt(processor, tokenizer) -> str:
+    """Granite's chat template expects a literal `<|audio|>` marker inside
+    a plain string; Qwen2-Audio expects the structured content list. Both
+    are the documented path for their own model, so both are here."""
+    if _is_granite(processor):
+        conversation = [
+            {"role": "user", "content": f"<|audio|>{TRANSCRIBE_PROMPT}"}
+        ]
+    else:
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio"},
+                    {"type": "text", "text": TRANSCRIBE_PROMPT},
+                ],
+            }
+        ]
+    return tokenizer.apply_chat_template(
+        conversation, tokenize=False, add_generation_prompt=True
+    )
+
+
+def _audio_llm_inputs(processor, prompt: str, audio: np.ndarray, sample_rate: int):
+    """Granite wants a `(1, samples)` torch tensor and rejects
+    `sampling_rate` (it reaches the tokenizer and raises); Qwen2-Audio
+    wants numpy and requires `sampling_rate`."""
+    if _is_granite(processor):
+        torch = _torch()
+        return processor(
+            prompt,
+            torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0),
+            return_tensors="pt",
+        )
+    return processor(
+        text=prompt,
+        audio=[audio],
+        sampling_rate=sample_rate,
+        return_tensors="pt",
+    )
+
+
+def run_audio_llm(
+    chunks: list[np.ndarray],
+    model_id: str,
+    language: str = "en",
+    device: str | None = None,
+) -> list[str]:
+    """Audio-conditioned LLMs driven by a chat template: Granite Speech,
+    Qwen2-Audio.
+
+    The template is what tells the model this is a transcription task, so
+    the two have to stay together — the processor knows where the audio
+    placeholder goes for its own model."""
+    torch = _torch()
+    from transformers import AutoProcessor
+
+    device, dtype = _device_and_dtype(device)
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = _load_generative_model(model_id, dtype)
+    model.to(device).eval()
+    sample_rate = _expected_sample_rate(processor)
+
+    tokenizer = getattr(processor, "tokenizer", processor)
+    prompt = _audio_llm_prompt(processor, tokenizer)
+
+    texts: list[str] = []
+    for chunk in chunks:
+        inputs = _audio_llm_inputs(
+            processor, prompt, _resample(chunk, sample_rate), sample_rate
+        )
+        inputs = {
+            k: (v.to(device) if hasattr(v, "to") else v)
+            for k, v in inputs.items()
+        }
+        with torch.no_grad():
+            ids = model.generate(**inputs, max_new_tokens=440, do_sample=False)
+        # Strip the prompt: these models echo the full conversation back.
+        prompt_len = inputs["input_ids"].shape[-1]
+        new_ids = ids[:, prompt_len:]
+        texts.append(
+            tokenizer.batch_decode(new_ids, skip_special_tokens=True)[0].strip()
+        )
+
+    _release(model, processor)
+    return texts
+
+
+def run_voxtral(
+    chunks: list[np.ndarray],
+    model_id: str,
+    language: str = "en",
+    device: str | None = None,
+) -> list[str]:
+    """Voxtral ships a dedicated transcription request builder, which is
+    the supported path — the generic chat template puts it in
+    understanding mode and it starts answering questions about the audio
+    instead of transcribing it."""
+    import tempfile
+    from pathlib import Path
+
+    import soundfile as sf
+
+    torch = _torch()
+    from transformers import AutoProcessor, VoxtralForConditionalGeneration
+
+    device, dtype = _device_and_dtype(device)
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = VoxtralForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
+    model.to(device).eval()
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="voxtral-"))
+    texts: list[str] = []
+    try:
+        for index, chunk in enumerate(chunks):
+            wav = tmpdir / f"chunk-{index}.wav"
+            sf.write(str(wav), chunk, SAMPLE_RATE, subtype="PCM_16")
+            inputs = processor.apply_transcription_request(
+                language=language, audio=str(wav), model_id=model_id
+            )
+            inputs = inputs.to(device, dtype=dtype)
+            with torch.no_grad():
+                ids = model.generate(**inputs, max_new_tokens=440)
+            decoded = processor.batch_decode(
+                ids[:, inputs.input_ids.shape[1]:], skip_special_tokens=True
+            )
+            texts.append(decoded[0].strip())
+            wav.unlink(missing_ok=True)
+    finally:
+        try:
+            tmpdir.rmdir()
+        except OSError:
+            pass
+        _release(model, processor)
+    return texts
+
+
+def run_phi4_multimodal(
+    chunks: list[np.ndarray],
+    model_id: str,
+    language: str = "en",
+    device: str | None = None,
+) -> list[str]:
+    """Phi-4-multimodal uses literal `<|audio_1|>` markers in a
+    hand-built prompt rather than a chat template, and needs its own
+    generation config."""
+    torch = _torch()
+    from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
+
+    device, dtype = _device_and_dtype(device)
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, dtype=dtype, trust_remote_code=True, _attn_implementation="eager"
+    )
+    model.to(device).eval()
+    generation_config = GenerationConfig.from_pretrained(model_id)
+
+    prompt = (
+        f"<|user|><|audio_1|>{TRANSCRIBE_PROMPT}<|end|><|assistant|>"
+    )
+
+    texts: list[str] = []
+    for chunk in chunks:
+        inputs = processor(
+            text=prompt, audios=[(chunk, SAMPLE_RATE)], return_tensors="pt"
+        ).to(device)
+        with torch.no_grad():
+            ids = model.generate(
+                **inputs,
+                max_new_tokens=440,
+                generation_config=generation_config,
+                do_sample=False,
+            )
+        new_ids = ids[:, inputs["input_ids"].shape[1]:]
+        texts.append(
+            processor.batch_decode(new_ids, skip_special_tokens=True)[0].strip()
+        )
+
+    _release(model, processor)
+    return texts
+
+
+HF_RUNNERS = {
+    "seq2seq": run_seq2seq,
+    "audio-llm": run_audio_llm,
+    "voxtral": run_voxtral,
+    "phi4": run_phi4_multimodal,
+}
+
+
+def run_hf(
+    chunks: list[np.ndarray],
+    model_id: str,
+    family: str,
+    language: str = "en",
+    device: str | None = None,
+) -> list[str]:
+    try:
+        runner = HF_RUNNERS[family]
+    except KeyError:
+        raise ValueError(f"Unknown HF family: {family}") from None
+    return runner(chunks, model_id, language, device=device)
