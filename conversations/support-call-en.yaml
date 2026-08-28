@@ -10,9 +10,11 @@ notes: >
 speakers:
   - id: agent
     name: Sarah
+    gender: f
     rate: 180
   - id: caller
     name: David
+    gender: m
     rate: 165
 
 turns:

@@ -24,11 +24,42 @@ dependencies = [
     # Conversation scripts for the synthesiser. score.py deliberately has
     # no scoring dependency: it ships its own Levenshtein alignment and
     # number speller, and picks up jiwer / num2words automatically if you
-    # install them yourself.
+    # install them (see the `scoring` extra).
     "pyyaml>=6.0",
+
+    # TTS engines. Rendering the same script through several unrelated
+    # synthesis lineages is what keeps the benchmark from measuring one
+    # synthesiser instead of the models — see "TTS backends" in the
+    # README. macOS `say` needs nothing installed and stays the default,
+    # so both of these are cheap additions rather than hard requirements
+    # for the basic path.
+    "piper-tts>=1.7",
+    "kokoro>=0.9",
 
     # Report rendering
     "rich>=13",
+]
+
+[project.optional-dependencies]
+# Models that pull in a bespoke tokenizer or a newer transformers than
+# the NeMo pin allows. Kept out of the default install so a plain
+# `uv sync` cannot break the NeMo runtime.
+extra-models = [
+    # Voxtral's tokenizer.
+    "mistral-common[audio]>=1.11",
+]
+# score.py ships its own Levenshtein alignment and number speller, and
+# picks these up automatically when present. Installing them switches it
+# to the reference implementations.
+scoring = [
+    "jiwer>=3.1",
+    "num2words>=0.5",
+]
+# pyannote is the standard diarisation baseline and is natively
+# overlap-aware. Every model is gated on HuggingFace, so it also needs
+# an accepted licence and an HF_TOKEN.
+diarisation = [
+    "pyannote.audio>=4.0",
 ]
 
 

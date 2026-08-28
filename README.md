@@ -4,6 +4,8 @@ Benchmark local open-weight ASR models against each other on **multi-speaker con
 
 The trick: instead of hunting for labelled meeting audio, the harness *synthesises* the conversation from a script. One TTS voice per speaker, laid out on a timeline with realistic pauses and overlaps, then pushed through degradation profiles (telephony codec, room reverb, background noise, clipping). Because we started from the text, every session ships a word-exact reference transcript — so the benchmark reports real **WER/CER**, not just side-by-side transcripts to eyeball.
 
+The catch that comes with the trick: a synthesiser has a fingerprint, and scoring against one engine measures the engine as much as the model. So every script renders through three unrelated TTS lineages (Apple `say`, Piper, Kokoro), and the engine is part of the session identity. It matters more than it sounds — on these sessions the model ranking *inverts* between engines. See [TTS backends](#tts-backends).
+
 ```
 conversations/*.yaml  ──synth.py──▶  sessions/<name>__<profile>/  ──bench.py──▶  runs/<name>/  ──compare.py──▶  comparison.md
    the script            TTS +           audio + ground truth          ASR models        metrics           the report
@@ -26,6 +28,14 @@ Transcription:
 | `whisper-large-v3` | faster-whisper | multilingual | The reference big autoregressive decoder |
 | `whisper-large-v3-turbo` | faster-whisper | multilingual | Same encoder, 4-layer decoder — much faster, slightly worse |
 | `distil-whisper-large-v3` | faster-whisper | English | Distilled Whisper |
+| `parakeet-ctc-1.1b` | NeMo | English | CTC head rather than a transducer — the "how much does the decoder matter" data point |
+| `canary-qwen-2.5b` | NeMo (SALM) | English | Speech encoder feeding an LLM decoder |
+| `kyutai-stt-2.6b` | transformers | English | `kyutai/stt-2.6b-en-trfs`. Streaming architecture; trained at 24 kHz, not 16 |
+| `moonshine-base` | transformers | English | 61M params — the small-and-fast end of the range |
+| `granite-speech-4.1` | transformers | English | IBM's audio LLM (2026) |
+| `voxtral-mini-3b` | transformers | multilingual | Mistral's audio LLM. No longer gated |
+| `qwen2-audio-7b` | transformers | multilingual | Audio LLM, wired up but unverified |
+| `phi-4-multimodal` | transformers | multilingual | Audio LLM, wired up but unverified |
 
 Diarisation:
 
@@ -37,7 +47,15 @@ Diarisation:
 
 Models declare which languages they support, and `bench.py` skips the pairings that make no sense (running an English-only model on a German session produces garbage that looks like model failure but is really operator error). `--ignore-language-support` forces them to run anyway.
 
-Voxtral can be added once you have Mistral's HuggingFace access.
+Everything runs on the GPU. There is deliberately no CPU fallback: a 3B audio
+LLM on CPU is slower than realtime by a wide margin, which makes the RTF column
+meaningless and ties up the machine for nothing. A model that will not run on
+Metal is a result, and belongs in the table as one.
+
+Not every failure raises, either — some models deadlock inside a Metal command
+buffer that never completes, which reads as a very slow run rather than a bug.
+`--timeout` (default 900 s) turns that into a normal cell result so the rest of
+the matrix still finishes.
 
 ## Install
 
@@ -70,6 +88,7 @@ speakers:
     rate: 185          # words per minute (optional)
   - id: b
     name: Markus
+    gender: m          # optional; only used to pick a plausible voice
     voice: Anna        # optional; auto-assigned per language if omitted
 turns:
   - speaker: a
@@ -91,12 +110,17 @@ Overlap deserves its own script rather than a sprinkling of negative gaps. `stan
 # one session per difficulty level, from a single TTS pass
 uv run python synth.py --script conversations/standup-de.yaml \
     --degrade clean phone farfield
+
+# same script through a second engine — this is what makes the numbers
+# mean something (see "TTS backends" below)
+uv run python synth.py --script conversations/standup-de.yaml --tts piper \
+    --degrade clean phone farfield
 ```
 
 Each session directory contains:
 
 ```
-sessions/standup-de__phone/
+sessions/standup-de__say__phone/
   session.json          # manifest: language, speakers, duration, overlap, degradation
   audio/mixed.wav       # the conversation as one stream — the realistic case
   audio/spk-a.wav       # per-speaker isolated channels (same timeline, silent elsewhere)
@@ -122,12 +146,55 @@ Same `--seed` gives byte-identical audio, so re-runs stay comparable.
 
 ### TTS backends
 
-`say` (macOS, default) needs nothing installed. Piper is optional and cross-platform — pass `--tts piper` and set each speaker's `voice:` to a `.onnx` model path.
+The synthesiser is not a neutral pipe. Score a model against one engine's
+output and part of what you measure is that engine, so `--tts` renders the
+same script through three unrelated synthesis lineages:
+
+| Backend | Lineage | Languages | Needs |
+|---|---|---|---|
+| `say` | Apple's system voices | whatever macOS has installed | macOS |
+| `piper` | VITS | de, en (voice pool in `synth.py`) | `piper-tts`, voices download on first use |
+| `kokoro` | StyleTTS2, 82M, runs on MPS | en only — it has no German | `kokoro` |
+
+The engine is part of the session directory name (`standup-de__piper__clean`),
+because two sessions from the same script and profile but different engines are
+different test data and their numbers are not interchangeable.
+
+Voices are assigned one per speaker and never reused — a shared voice would make
+diarisation meaningless. A speaker's optional `gender:` picks a plausible voice
+where one is free; it has no effect on scoring.
+
+**This is not a small effect.** Same script, same profile, mixed channel:
+
+| Model | `say` | `piper` | `kokoro` | Spread |
+|---|---|---|---|---|
+| `parakeet-tdt-v2` | **9.3 %** | 13.5 % | **9.3 %** | 4.2 |
+| `whisper-large-v3-turbo` | 11.8 % | **11.8 %** | 9.7 % | 2.1 |
+| `moonshine-base` | 11.4 % | 12.7 % | 10.1 % | 2.5 |
+
+On `say`, Parakeet is the best of the three and Whisper-Turbo the worst. On
+`piper` that ordering is exactly reversed. A single-engine benchmark would not
+have reported a noisy version of the right answer — it would have reported the
+wrong ranking with a straight face. Compare models within an engine, and treat a
+result that only holds on one engine as a property of that engine.
+
+The axis is not specific to transcription. `sortformer-streaming` scores 1.5 %
+DER on `standup-de__say__clean` and 4.0 % on the same script under `piper` —
+the diarisation task got harder because the voices changed, not because the
+recording did.
+
+Caveat when reading German cross-engine numbers: the German Piper voices are
+unevenly trained (only Thorsten reaches `medium` quality), so a German `say` ↔
+`piper` delta mixes model behaviour with voice quality. The English voices are
+all medium/high and do not have this problem.
+
+TTS renders are cached in `.tts-cache/` per engine, so generating eight
+difficulty levels costs one synthesis pass, not eight.
 
 ## 3. Benchmark
 
 ```sh
-uv run python bench.py --session sessions/standup-de__phone \
+uv run python bench.py --session sessions/standup-de__say__phone \
     --models canary whisper-large-v3 \
     --channels mixed
 ```
@@ -137,8 +204,8 @@ Defaults: every channel in the session, every model that supports the session la
 ## 4. Diarise
 
 ```sh
-uv run python diarize.py --session sessions/standup-de__clean \
-    --run-name standup-de__clean_2026-08-28_01-14-22
+uv run python diarize.py --session sessions/standup-de__say__clean \
+    --run-name standup-de__say__clean_2026-08-28_01-14-22
 ```
 
 Answers "who spoke when" and scores it as **DER** against the speaker-labelled turns in `reference.json`. Point `--run-name` at an existing bench run and the diarisation lands in the same directory, so `compare.py` picks it up.
@@ -165,18 +232,18 @@ Every knob in the `titanet` pipeline is a CLI flag, with the defaults shown:
 
 ```sh
 uv run python diarize.py --sweep \
-    --sweep-sessions sessions/standup-de__clean sessions/standup-de__phone \
-                     sessions/standup-de__noisy sessions/support-call-en__clean
+    --sweep-sessions sessions/standup-de__say__clean sessions/standup-de__say__phone \
+                     sessions/standup-de__say__noisy sessions/support-call-en__say__clean
 ```
 
-**Sweep across several sessions or not at all.** Tuned on `standup-de__clean` alone, the search reports DER 27.3 % → 3.6 %; those same values then score 58.8 % on `standup-de__phone`, where they find 32 speakers in a 3-speaker recording. Scored honestly across four sessions the whole search is worth 12.4 % → 11.7 %, and the defaults for `--window` and `--hop` come out already optimal. That is the reason `--sweep` refuses to take a single session as the objective, and a failed session is scored as DER 1.0 so a configuration cannot win by collapsing on hard input.
+**Sweep across several sessions or not at all.** Tuned on `standup-de__say__clean` alone, the search reports DER 27.3 % → 3.6 %; those same values then score 58.8 % on `standup-de__say__phone`, where they find 32 speakers in a 3-speaker recording. Scored honestly across four sessions the whole search is worth 12.4 % → 11.7 %, and the defaults for `--window` and `--hop` come out already optimal. That is the reason `--sweep` refuses to take a single session as the objective, and a failed session is scored as DER 1.0 so a configuration cannot win by collapsing on hard input.
 
 The one change with cross-session evidence behind it is the VAD threshold, which is why the default is −40 dB rather than the −33 dB this repo started with.
 
 ## 5. Compare
 
 ```sh
-uv run python compare.py --run-name standup-de__phone_2026-08-28_01-14-22
+uv run python compare.py --run-name standup-de__say__phone_2026-08-28_01-14-22
 ```
 
 Writes `runs/<run-name>/comparison.md`:
@@ -239,6 +306,12 @@ The NeMo models are fed in silence-aware windows: `bench.py` cuts near the quiet
 Tested on Apple Silicon. NeMo falls back to CPU for some ops on MPS via `PYTORCH_ENABLE_MPS_FALLBACK=1` (already set in `.env.example`). faster-whisper runs CPU-only with int8 quantisation — fast enough and sidesteps Metal backend quirks.
 
 Measured on an Apple Silicon laptop, `mixed` channel, `clean` profile, one subprocess per model so the memory figures are attributable.
+
+> **These tables are `--tts say` only, and predate two changes: `jiwer`/`num2words`
+> are now installed (so `score.py` uses its reference implementations rather than
+> the fallbacks), and the newer models below are not in them. Read them as a
+> snapshot, not as current numbers — and given the cross-engine spread documented
+> under "TTS backends", do not treat a single-engine ranking as the ranking.**
 
 **German** — `standup-de`, 94 s, 3 speakers, 226 reference words:
 
@@ -327,6 +400,7 @@ A full 8-model matrix on a 90-second session takes roughly 10 minutes. Longer se
 | `compare.py` | run directory → Markdown report |
 | `audio_io.py` | shared decode/encode helpers (ffmpeg + libsndfile) |
 | `envfile.py` | loads `.env` before torch/NeMo import, so caches land where you asked |
+| `hf_runners.py` | transcription runners for the `transformers`-based models |
 | `conversations/` | conversation scripts — the source of truth for sessions |
 
-`sessions/`, `runs/` and `.tts-cache/` are gitignored: all three are reproducible from the scripts, so the scripts are what gets committed, not the waveforms.
+`sessions/`, `runs/`, `.tts-cache/` and `.piper-voices/` are gitignored: all four are reproducible from the scripts, so the scripts are what gets committed, not the waveforms.

@@ -15,6 +15,8 @@ runs/
 # out of git — the scripts are the source of truth, not the waveforms.
 sessions/
 .tts-cache/
+# Piper voice models, downloaded on first use.
+.piper-voices/
 
 # Any audio the user drops here for ad-hoc testing.
 audio/

@@ -65,6 +65,10 @@ NEMO_PAD_SECONDS = 0.3
 # How often an empty window may be split in half before we accept the
 # empty result. 3 takes a 15 s window down to ~2 s.
 NEMO_MAX_RETRY_DEPTH = 3
+# Wall clock per cell. Generous enough for a 7B audio LLM chewing through
+# a two-minute session on the GPU, short enough that a model deadlocked
+# in a Metal command buffer does not hold the machine indefinitely.
+DEFAULT_CELL_TIMEOUT = 900.0
 
 console = Console()
 
@@ -543,10 +547,6 @@ MODEL_REGISTRY: dict[str, dict] = {
         "label": "Mistral Voxtral Mini 3B (2025)",
         "languages": None,
         "chunk_seconds": 30.0,
-        # MPS deadlocks on this one: the process parks forever inside a
-        # Metal command buffer instead of raising, so it looks like a very
-        # slow run rather than a failure. CPU is slower but finishes.
-        "device": "cpu",
     },
     "phi-4-multimodal": {
         "kind": "hf",
@@ -772,6 +772,7 @@ def bench_cell_subprocess(
     channel: str,
     language: str,
     run_dir: Path,
+    timeout_seconds: float | None = None,
 ) -> "ModelRun":
     """Run one cell in a fresh interpreter, then read back what it wrote.
 
@@ -789,7 +790,23 @@ def bench_cell_subprocess(
         "--language", language,
         "--run-name", run_dir.name,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_seconds
+        )
+    except subprocess.TimeoutExpired:
+        # Not every failure raises. Some models deadlock on MPS inside a
+        # Metal command buffer that never completes, and without a wall
+        # clock the matrix simply stops there and holds the machine for
+        # as long as nobody is watching. A timeout turns that into a
+        # normal cell result and lets the remaining models run.
+        return ModelRun(
+            model_id=model_key, channel=channel, audio_seconds=0.0,
+            wall_seconds=timeout_seconds or 0.0, rtf=0.0, peak_rss_mb=0.0,
+            text="",
+            error=f"timed out after {timeout_seconds:.0f}s",
+            accuracy=None,
+        )
 
     if not metrics_path.exists():
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
@@ -879,6 +896,15 @@ def main() -> int:
              "meaningless from the second model onwards (see --worker).",
     )
     ap.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_CELL_TIMEOUT,
+        help="Seconds before a model is abandoned and recorded as timed "
+             f"out (default: {DEFAULT_CELL_TIMEOUT:.0f}). 0 disables the "
+             "limit. Guards against models that deadlock on MPS instead "
+             "of failing.",
+    )
+    ap.add_argument(
         "--worker",
         nargs=2,
         metavar=("MODEL", "CHANNEL"),
@@ -941,7 +967,10 @@ def main() -> int:
             if args.in_process:
                 run = bench_cell(session, model_key, ch, language, run_dir)
             else:
-                run = bench_cell_subprocess(session, model_key, ch, language, run_dir)
+                run = bench_cell_subprocess(
+                    session, model_key, ch, language, run_dir,
+                    timeout_seconds=args.timeout or None,
+                )
             results.append(run)
 
             if run.error:

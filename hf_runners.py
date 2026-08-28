@@ -46,14 +46,18 @@ def _torch():
 
 
 def _device_and_dtype(override: str | None = None):
-    """Apple Silicon: MPS where it works, float32 because half precision
-    is patchy across these architectures on Metal and a wrong dtype shows
-    up as silent garbage output rather than an exception.
+    """Apple Silicon: MPS, float32.
 
-    Some models deadlock on MPS rather than failing — Voxtral parks in a
-    Metal command buffer that never completes, which looks like a very
-    slow run instead of a bug. Those get `device: "cpu"` in the registry,
-    and `ASR_BENCH_DEVICE` overrides everything for one-off debugging."""
+    float32 because half precision is patchy across these architectures
+    on Metal and a wrong dtype shows up as silent garbage output rather
+    than an exception.
+
+    There is deliberately no CPU fallback for a working GPU. A 3B audio
+    LLM on CPU is slower than realtime by a wide margin, which makes the
+    RTF column meaningless and ties up the machine for nothing — a model
+    that will not run on the GPU is a result in itself and belongs in the
+    results table as such, not as a number nobody can act on.
+    `ASR_BENCH_DEVICE` overrides this for one-off debugging."""
     import os
 
     torch = _torch()
@@ -274,7 +278,14 @@ def run_voxtral(
 
     device, dtype = _device_and_dtype(device)
     processor = AutoProcessor.from_pretrained(model_id)
-    model = VoxtralForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
+    # Voxtral's decoder is a Ministral with sliding-window attention. On
+    # MPS the fused SDPA path submits a Metal command buffer that never
+    # completes: the run does not fail, it parks forever in
+    # `waitUntilCompleted`, which reads as a very slow model rather than
+    # a broken one. Eager attention is slower per token but finishes.
+    model = VoxtralForConditionalGeneration.from_pretrained(
+        model_id, dtype=dtype, attn_implementation="eager"
+    )
     model.to(device).eval()
 
     tmpdir = Path(tempfile.mkdtemp(prefix="voxtral-"))

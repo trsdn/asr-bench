@@ -17,15 +17,19 @@ notes: >
 speakers:
   - id: a
     name: Nadia
+    gender: f
     rate: 195
   - id: b
     name: Tobias
+    gender: m
     rate: 180
   - id: c
     name: Sabine
+    gender: f
     rate: 200
   - id: d
     name: Jonas
+    gender: m
     rate: 175
 
 turns:

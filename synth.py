@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -73,6 +74,67 @@ PREFERRED_VOICES = {
     "it": ["Alice", "Luca", "Federica"],
 }
 
+# Every engine here is a different synthesis lineage — Apple's `say`,
+# Piper (VITS) and Kokoro (StyleTTS2). That is the whole point: a model
+# scored against one engine's output tells you as much about that engine
+# as about the model. Rendering the same script through several engines
+# turns "is this model good" into "is this model good regardless of who
+# is speaking", which is the question a benchmark should answer.
+TTS_BACKENDS = ("say", "piper", "kokoro")
+
+# Piper voices as (name, gender), one entry per distinct *speaker*, best
+# quality available for that speaker. Gender is only used to match a
+# script's `gender:` field where it declares one; distinctness always
+# wins over matching, because two speakers sharing a voice would make
+# diarisation numbers meaningless while a mismatched voice would not.
+#
+# Caveat worth knowing before reading German cross-engine numbers: the
+# German Piper voices are unevenly trained (only Thorsten reaches
+# `medium`), so a German delta between `say` and `piper` mixes model
+# behaviour with voice quality. The English voices are all medium/high
+# and do not have this problem.
+PIPER_VOICES = {
+    "de": [
+        ("de_DE-thorsten-medium", "m"),
+        ("de_DE-kerstin-low", "f"),
+        ("de_DE-karlsson-low", "m"),
+        ("de_DE-eva_k-x_low", "f"),
+        ("de_DE-pavoque-low", "m"),
+        ("de_DE-ramona-low", "f"),
+    ],
+    "en": [
+        ("en_US-ryan-high", "m"),
+        ("en_US-lessac-high", "f"),
+        ("en_US-joe-medium", "m"),
+        ("en_US-amy-medium", "f"),
+        ("en_US-hfc_male-medium", "m"),
+        ("en_US-kristin-medium", "f"),
+        ("en_GB-alan-medium", "m"),
+        ("en_GB-cori-high", "f"),
+    ],
+}
+
+# Kokoro ships American and British English plus a handful of other
+# languages, but no German — hence English-only here. Names encode
+# accent and gender: a=American, b=British, f=female, m=male.
+KOKORO_VOICES = {
+    "en": [
+        ("am_michael", "m"), ("af_heart", "f"),
+        ("am_fenrir", "m"), ("af_bella", "f"),
+        ("am_puck", "m"), ("af_nicole", "f"),
+        ("bm_george", "m"), ("bf_emma", "f"),
+    ],
+}
+
+# Kokoro's language codes are single letters rather than ISO codes.
+KOKORO_LANG_CODES = {"en": "a"}
+
+# Where Piper voice models are downloaded to. Kept beside the audio cache
+# rather than in the repo: these are weights, not source.
+PIPER_VOICE_DIR = Path(
+    os.environ.get("ASR_BENCH_PIPER_DIR", REPO_DIR / ".piper-voices")
+)
+
 
 # ──────────────────────────────────────────────
 # Script model
@@ -86,6 +148,9 @@ class Speaker:
     voice: str | None = None
     rate: int | None = None       # words per minute (`say` only)
     backend: str | None = None    # override the global TTS backend
+    # "f" / "m", optional. Only used to pick a plausible voice from an
+    # engine's catalogue; it has no effect on scoring.
+    gender: str | None = None
 
 
 @dataclass
@@ -126,6 +191,8 @@ def load_script(path: Path) -> Conversation:
             voice=s.get("voice"),
             rate=s.get("rate"),
             backend=s.get("backend"),
+            gender=(str(s["gender"]).strip().lower()[:1] or None)
+            if s.get("gender") else None,
         )
         for s in raw.get("speakers", [])
     ]
@@ -189,20 +256,70 @@ def list_say_voices() -> list[tuple[str, str]]:
     return voices
 
 
+def _assign_from_pool(
+    conv: Conversation,
+    pool: list[tuple[str, str]],
+    backend: str,
+    lang: str,
+) -> dict[str, str]:
+    """Hand out distinct voices from a fixed pool.
+
+    Shared by Piper and Kokoro, which unlike `say` have a known voice
+    catalogue rather than whatever happens to be installed. A speaker's
+    declared `gender:` is honoured when a matching voice is still free,
+    and quietly ignored when it is not — a mismatched voice costs nothing
+    but a raised eyebrow on playback, whereas failing to synthesise would
+    cost a session."""
+    taken = {s.voice for s in conv.speakers if s.voice}
+    assigned: dict[str, str] = {}
+    for spk in conv.speakers:
+        if spk.voice:
+            assigned[spk.id] = spk.voice
+            continue
+        free = [name for name, _ in pool if name not in taken]
+        preferred = [
+            name for name, gender in pool
+            if name not in taken and spk.gender and gender == spk.gender
+        ]
+        candidate = next(iter(preferred or free), None)
+        if candidate is None:
+            raise RuntimeError(
+                f"{backend} has only {len(pool)} distinct {lang!r} voices, "
+                f"but the script has {len(conv.speakers)} speakers. Reuse "
+                f"would make diarisation numbers meaningless, so set "
+                f"`voice:` explicitly for the extra speakers."
+            )
+        assigned[spk.id] = candidate
+        taken.add(candidate)
+    return assigned
+
+
 def assign_voices(conv: Conversation, backend: str) -> dict[str, str]:
     """Pick a distinct voice per speaker.
 
     Distinctness matters more than realism here: if two speakers share a
     voice, diarisation and speaker-attribution numbers become meaningless.
     Explicit `voice:` entries in the script always win."""
+    lang = conv.language.split("-")[0].split("_")[0].lower()
+
     if backend == "piper":
-        missing = [s.id for s in conv.speakers if not s.voice]
-        if missing:
-            raise ValueError(
-                "Piper backend requires an explicit `voice:` (path to a .onnx "
-                f"model) for every speaker. Missing for: {', '.join(missing)}"
+        pool = PIPER_VOICES.get(lang)
+        if not pool:
+            raise RuntimeError(
+                f"No Piper voices configured for {lang!r}. Add them to "
+                f"PIPER_VOICES or set `voice:` per speaker."
             )
-        return {s.id: s.voice for s in conv.speakers}
+        return _assign_from_pool(conv, pool, "Piper", lang)
+
+    if backend == "kokoro":
+        pool = KOKORO_VOICES.get(lang)
+        if not pool:
+            raise RuntimeError(
+                f"Kokoro has no {lang!r} voices — it covers English plus a "
+                f"few other languages, but not German. Use --tts say or "
+                f"--tts piper for this script."
+            )
+        return _assign_from_pool(conv, pool, "Kokoro", lang)
 
     available = list_say_voices()
     if not available:
@@ -213,7 +330,6 @@ def assign_voices(conv: Conversation, backend: str) -> dict[str, str]:
 
     lang = conv.language.split("-")[0].split("_")[0].lower()
     by_name = {name: locale for name, locale in available}
-
     def base_name(voice: str) -> str:
         """'Eddy (Deutsch (Deutschland))' → 'Eddy'. Recent macOS releases
         expose most voices only in this locale-qualified form."""
@@ -258,12 +374,50 @@ def assign_voices(conv: Conversation, backend: str) -> dict[str, str]:
     return assigned
 
 
+_PIPER_CACHE: dict[str, object] = {}
+_KOKORO_CACHE: dict[str, object] = {}
+
+
+def _piper_voice(name: str):
+    """Load a Piper voice, downloading it on first use.
+
+    Cached per process: a voice is a few tens of MB of ONNX weights, and
+    a script re-uses the same speaker across dozens of turns."""
+    if name in _PIPER_CACHE:
+        return _PIPER_CACHE[name]
+    from piper import PiperVoice
+    from piper.download_voices import download_voice
+
+    PIPER_VOICE_DIR.mkdir(parents=True, exist_ok=True)
+    model = PIPER_VOICE_DIR / f"{name}.onnx"
+    if not model.exists():
+        print(f"  downloading Piper voice {name} …")
+        download_voice(name, PIPER_VOICE_DIR)
+    _PIPER_CACHE[name] = PiperVoice.load(model)
+    return _PIPER_CACHE[name]
+
+
+def _kokoro_pipeline(lang_code: str):
+    """Kokoro on the GPU. It is 82M parameters, so this costs little, but
+    it is still a torch model and reloading it per turn would dominate
+    synthesis time."""
+    if lang_code in _KOKORO_CACHE:
+        return _KOKORO_CACHE[lang_code]
+    import torch
+    from kokoro import KPipeline
+
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    _KOKORO_CACHE[lang_code] = KPipeline(lang_code=lang_code, device=device)
+    return _KOKORO_CACHE[lang_code]
+
+
 def synth_turn(
     text: str,
     voice: str,
     backend: str,
     rate: int | None,
     sr: int = TARGET_SR,
+    language: str = "en",
 ) -> np.ndarray:
     """Render one utterance to mono float32 at `sr`, with an on-disk cache.
 
@@ -271,7 +425,8 @@ def synth_turn(
     regenerating the same script at three degradation levels costs one TTS
     pass, not three."""
     key_src = json.dumps(
-        {"t": text, "v": voice, "b": backend, "r": rate, "sr": sr}, sort_keys=True
+        {"t": text, "v": voice, "b": backend, "r": rate, "sr": sr, "l": language},
+        sort_keys=True,
     )
     key = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:20]
     cached = TTS_CACHE / f"{key}.wav"
@@ -294,16 +449,29 @@ def synth_turn(
             subprocess.run(cmd, capture_output=True, check=True)
         elif backend == "piper":
             raw = tmpdir / "turn.wav"
-            piper = shutil.which("piper") or shutil.which("piper-tts")
-            if piper is None:
-                raise RuntimeError(
-                    "piper not found on PATH. Install it (`uv tool install "
-                    "piper-tts`) or use --tts say."
-                )
-            subprocess.run(
-                [piper, "--model", voice, "--output_file", str(raw)],
-                input=text.encode("utf-8"), capture_output=True, check=True,
+            import wave
+
+            piper_voice = _piper_voice(voice)
+            with wave.open(str(raw), "wb") as wav:
+                piper_voice.synthesize_wav(text, wav)
+        elif backend == "kokoro":
+            lang_code = KOKORO_LANG_CODES.get(
+                language.split("-")[0].split("_")[0].lower(), "a"
             )
+            pipeline = _kokoro_pipeline(lang_code)
+            # Kokoro splits on its own and yields one result per chunk;
+            # a turn is short, but joining is still the correct thing to
+            # do rather than taking the first result.
+            parts = [
+                r.audio.detach().cpu().numpy()
+                for r in pipeline(text, voice=voice, speed=1.0)
+                if r.audio is not None
+            ]
+            if not parts:
+                raise RuntimeError(f"Kokoro produced no audio for: {text[:60]!r}")
+            audio_24k = np.concatenate(parts).astype(np.float32)
+            raw = tmpdir / "turn.wav"
+            write_wav(raw, audio_24k, 24_000)
         else:
             raise ValueError(f"Unknown TTS backend: {backend}")
 
@@ -377,6 +545,7 @@ def build_timeline(
             spk.backend or backend,
             spk.rate,
             sr,
+            language=conv.language,
         )
         rendered.append((turn, audio))
         if verbose:
@@ -558,7 +727,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--out", type=Path, default=None,
-        help="Session directory. Default: sessions/<script>__<profile>.",
+        help="Session directory. Default: sessions/<script>__<tts>__<profile>.",
     )
     ap.add_argument(
         "--degrade", nargs="+", default=["clean"], choices=sorted(PROFILES),
@@ -566,8 +735,10 @@ def main() -> int:
              "which is the intended way to build a difficulty ladder.",
     )
     ap.add_argument(
-        "--tts", default="say", choices=["say", "piper"],
-        help="TTS backend. Default: macOS `say`.",
+        "--tts", default="say", choices=list(TTS_BACKENDS),
+        help="TTS backend. Default: macOS `say`. Rendering the same "
+             "script through several backends is what keeps the benchmark "
+             "from measuring one synthesiser instead of the models.",
     )
     ap.add_argument(
         "--seed", type=int, default=0,
@@ -607,7 +778,15 @@ def main() -> int:
             out_dir = args.out.expanduser().resolve()
         else:
             base = args.out or (REPO_DIR / "sessions")
-            out_dir = Path(base).expanduser().resolve() / f"{conv.name}__{profile}"
+            # The TTS engine is part of the session identity, not a
+            # footnote in the manifest: two sessions from the same script
+            # and profile but different engines are different test data,
+            # and burying that in a JSON field invites comparing numbers
+            # that are not comparable.
+            out_dir = (
+                Path(base).expanduser().resolve()
+                / f"{conv.name}__{args.tts}__{profile}"
+            )
         print(f"\nWriting [{profile}] → {out_dir}")
         write_session(
             out_dir, conv, voices, args.tts, tracks, segments,

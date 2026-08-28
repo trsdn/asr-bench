@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Multiple TTS engines as a first-class benchmark axis.** `--tts` now takes `say`, `piper` or `kokoro` — three unrelated synthesis lineages (Apple system voices, VITS, StyleTTS2) — and the engine is part of the session directory name (`standup-de__piper__clean`). This is not cosmetic: on `support-call-en__clean` the same three models score 9.3 / 11.8 / 11.4 % WER under `say` and 13.5 / 11.8 / 12.7 % under `piper`, which *inverts* the ranking between best and worst model. A single-engine benchmark reports the wrong answer confidently.
+- Piper and Kokoro voices are auto-assigned per language from a curated pool, one distinct voice per speaker, downloading on first use. Piper previously required an explicit `.onnx` path per speaker, which made it unusable as a comparison axis.
+- Optional `gender:` on a speaker, used only to pick a plausible voice from an engine's catalogue. Distinctness still wins over matching, and it has no effect on scoring.
+- Eight models: `parakeet-ctc-1.1b`, `canary-qwen-2.5b` (SALM, LLM decoder), `moonshine-base`, `kyutai-stt-2.6b`, `granite-speech-4.1`, `voxtral-mini-3b`, `qwen2-audio-7b` and `phi-4-multimodal`. Measured on `support-call-en__say__clean`: kyutai 2.5 %, parakeet-ctc 5.5 %, canary-qwen 9.7 %, granite 9.7 %, moonshine 11.4 % WER.
+- `hf_runners.py`: the `transformers`-based models, one runner per family. The HuggingFace side is not uniform the way NeMo and faster-whisper are — an audio LLM wants a chat template, an encoder-decoder wants a feature tensor, Voxtral wants its own request builder.
+- `--timeout` on `bench.py` (default 900 s). Not every failure raises: some models deadlock inside a Metal command buffer that never completes, which presents as a very slow run and holds the machine indefinitely. A timeout records the cell as failed and lets the matrix finish.
 - `sortformer-streaming` diarisation backend (nvidia/diar_streaming_sortformer_4spk-v2, 2025) — the streaming successor to Sortformer v1. Cheaper (3.2 s vs 9.9 s on a 71 s session) and more consistent across sessions, though v1 remains stronger on overlapping speech.
 - Overlap-specific diarisation metrics: `diarization_error_rate` now reports a separate `overlap` block — seconds, share of speech, DER/miss/false-alarm/confusion restricted to frames with two or more simultaneous reference speakers, plus `detection_recall`. The 0.25 s collar is deliberately not applied there, since overlap sits on the boundaries a collar would mask. Surfaced by `compare.py` as its own table.
 - `conversations/crosstalk-de.yaml`: four speakers, 9.3 % overlapping speech, built to exercise crosstalk. The existing scripts have 0.6 % overlap, which is no test at all.
@@ -29,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Session directories now carry the TTS engine**: `standup-de__clean` becomes `standup-de__say__clean`. Two sessions from the same script and profile but different engines are different test data, and their numbers are not interchangeable — burying that in a manifest field invites comparing what cannot be compared.
+- No CPU fallback for the `transformers` models. A 3B audio LLM on CPU is slower than realtime by a wide margin, which makes the RTF column meaningless and ties up the machine for nothing; a model that will not run on Metal is a result in itself. `ASR_BENCH_DEVICE` overrides this for debugging.
+- Voxtral loads with eager attention. Its Ministral decoder's fused SDPA path submits a Metal command buffer that never completes on MPS — the run does not fail, it parks forever.
 - Renamed the project to `asr-bench`; it is no longer tied to any particular recording app.
 - Sessions are now described by a `session.json` manifest with arbitrarily named channels, replacing the fixed mic/system layout.
 - Transcription language is pinned from the session manifest for every model that accepts a hint, Whisper included — auto-detection can lose a whole session to one bad guess, which measures language ID rather than transcription.

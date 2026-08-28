@@ -9,12 +9,15 @@ notes: >
 speakers:
   - id: a
     name: Anna
+    gender: f
     rate: 185
   - id: b
     name: Markus
+    gender: m
     rate: 170
   - id: c
     name: Petra
+    gender: f
     rate: 195
 
 turns:
