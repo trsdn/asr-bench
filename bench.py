@@ -38,6 +38,7 @@ import itertools
 import json
 import os
 import resource
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, asdict
@@ -46,24 +47,9 @@ from pathlib import Path
 # Load .env (or fall back to .env.example) before anything that might
 # touch HF / NeMo / Torch caches. `.env` is per-machine and gitignored;
 # `.env.example` is the committed template.
-_repo_dir = Path(__file__).resolve().parent
-_env_file = _repo_dir / ".env"
-if not _env_file.exists():
-    _example = _repo_dir / ".env.example"
-    if _example.exists():
-        print(
-            f"[asr-bench] no .env found — falling back to {_example.name}. "
-            f"Copy it to .env and edit paths for your machine.",
-            file=sys.stderr,
-        )
-        _env_file = _example
-if _env_file.exists():
-    for line in _env_file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
+from envfile import load_env  # noqa: E402
+
+load_env()
 
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
@@ -124,7 +110,11 @@ def peak_rss_mb() -> float:
 # ──────────────────────────────────────────────
 
 
-def run_faster_whisper(audio: np.ndarray, model_name: str = "large-v3") -> str:
+def run_faster_whisper(
+    audio: np.ndarray,
+    model_name: str = "large-v3",
+    language: str | None = None,
+) -> str:
     from faster_whisper import WhisperModel
     # int8 for Apple Silicon — fast enough, small footprint. float16 is
     # not supported on CPU; the Metal backend is experimental in CT2.
@@ -133,7 +123,11 @@ def run_faster_whisper(audio: np.ndarray, model_name: str = "large-v3") -> str:
         audio,
         beam_size=5,
         vad_filter=True,  # trims long silence → fewer hallucinations
-        language=None,    # auto-detect
+        # Pinned to the session language, same as Canary. Auto-detection
+        # is a separate capability and letting it run here means a model
+        # can lose a whole session to one bad guess on the first few
+        # seconds — that measures language ID, not transcription.
+        language=language,
     )
     chunks = [seg.text.strip() for seg in segments]
     del model
@@ -334,21 +328,16 @@ def run_nemo_asr(
 
 
 MODEL_REGISTRY: dict[str, dict] = {
-    "parakeet-live": {
-        # Reads the recording app's own transcript.live.jsonl — the Parakeet v3
-        # output the user actually sees in production. Avoids having to
-        # reproduce the FluidAudio / Swift pipeline in Python (NeMo's
-        # EncDecRNNTBPE wrapper for parakeet-tdt-0.6b-v3 multilingual
-        # decoded to 0 tokens on our test audio). This is also a
-        # "truer" comparison target: it's literally the output the
-        # user is comparing Whisper / Canary against.
-        "kind": "live_transcript",
-        "label": "Live Parakeet-TDT v3 (as produced by the recording app)",
-    },
+    # `languages` lists the languages a model actually supports. English-only
+    # models scored against a German session produce nonsense that looks like
+    # a catastrophic model failure rather than what it is — the wrong tool for
+    # the job — so bench.py skips those pairings unless you force them.
+    # `languages: None` means "unrestricted".
     "canary": {
         "kind": "nemo",
         "nemo_id": "nvidia/canary-1b-flash",
-        "label": "NVIDIA Canary-1B-Flash (multilingual: en/de/fr/es)",
+        "label": "NVIDIA Canary-1B-Flash (en/de/fr/es)",
+        "languages": {"en", "de", "fr", "es"},
         # Canary silently drops material inside long windows — on a 29 s
         # chunk it returned ~75% of the words, with whole utterances
         # missing from the middle rather than the edges. Shorter windows
@@ -370,61 +359,75 @@ MODEL_REGISTRY: dict[str, dict] = {
             "task": "asr",
         },
     },
+    "canary-1b-v2": {
+        "kind": "nemo",
+        "nemo_id": "nvidia/canary-1b-v2",
+        "label": "NVIDIA Canary-1B v2 (2025, 25 European languages)",
+        "languages": None,
+        "chunk_seconds": 15.0,
+        "nemo_transcribe_kwargs": {
+            "source_lang": "{lang}",
+            "target_lang": "{lang}",
+            "pnc": "yes",
+        },
+    },
+    "canary-180m-flash": {
+        "kind": "nemo",
+        "nemo_id": "nvidia/canary-180m-flash",
+        "label": "NVIDIA Canary-180M-Flash (small, en/de/fr/es)",
+        "languages": {"en", "de", "fr", "es"},
+        "chunk_seconds": 15.0,
+        "nemo_transcribe_kwargs": {
+            "source_lang": "{lang}",
+            "target_lang": "{lang}",
+            "pnc": "yes",
+            "task": "asr",
+        },
+    },
+    "parakeet-tdt-v3": {
+        "kind": "nemo",
+        "nemo_id": "nvidia/parakeet-tdt-0.6b-v3",
+        "label": "NVIDIA Parakeet-TDT 0.6B v3 (2025, 25 European languages)",
+        "languages": None,
+        # TDT is a transducer: frame-synchronous and alignment-forced, so
+        # it has no EOS to emit early and tolerates longer windows than
+        # the attention-decoder models.
+        "chunk_seconds": 30.0,
+    },
+    "parakeet-tdt-v2": {
+        "kind": "nemo",
+        "nemo_id": "nvidia/parakeet-tdt-0.6b-v2",
+        "label": "NVIDIA Parakeet-TDT 0.6B v2 (2025, English only)",
+        "languages": {"en"},
+        "chunk_seconds": 30.0,
+    },
     "whisper-large-v3": {
         "kind": "whisper",
         "fw_id": "large-v3",
         "label": "OpenAI Whisper Large-v3 (via faster-whisper)",
+        "languages": None,
+    },
+    "whisper-large-v3-turbo": {
+        "kind": "whisper",
+        "fw_id": "large-v3-turbo",
+        "label": "OpenAI Whisper Large-v3-Turbo (4-layer decoder)",
+        "languages": None,
+    },
+    "distil-whisper-large-v3": {
+        "kind": "whisper",
+        "fw_id": "distil-large-v3",
+        "label": "Distil-Whisper Large-v3 (English only)",
+        "languages": {"en"},
     },
 }
 
 
-def run_live_transcript(session_dir: Path, channel: str) -> str:
-    """Extract the Parakeet-v3 output from the recording app's own
-    `transcript.live.jsonl` and split it by speaker so we can line it up
-    against model output for the `mic` vs `sys` channels separately.
-
-    `.you` speaker records map to the mic channel, everything else
-    (`.them` / `.remote(…)`) maps to sys. If the preferred file name is
-    missing we fall back to the `.pre-cleanup.bak` copy the app writes
-    at finalize time."""
-    import json
-
-    candidates = [
-        session_dir / "transcript.live.jsonl",
-        session_dir / "transcript.live.jsonl.pre-cleanup.bak",
-    ]
-    jsonl_path = next((p for p in candidates if p.exists()), None)
-    if jsonl_path is None:
-        raise FileNotFoundError(
-            f"No transcript.live.jsonl (or .bak) under {session_dir}"
-        )
-
-    mic_parts: list[str] = []
-    sys_parts: list[str] = []
-    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        speaker = rec.get("speaker")
-        # Speaker is serialised as either "you" or a dict like
-        # {"them": null} / {"remote": 1} depending on app version.
-        if speaker == "you" or (isinstance(speaker, dict) and "you" in speaker):
-            is_mic = True
-        else:
-            is_mic = False
-        # Prefer the cleaned / refined text (`refinedText`) over the raw
-        # `text` — that's what the UI shows.
-        text = rec.get("refinedText") or rec.get("text") or ""
-        text = text.strip()
-        if not text:
-            continue
-        (mic_parts if is_mic else sys_parts).append(text)
-
-    return " ".join(mic_parts if channel == "mic" else sys_parts).strip()
+def supports_language(model_key: str, language: str) -> bool:
+    """Whether a model claims to handle the session language."""
+    languages = MODEL_REGISTRY[model_key].get("languages")
+    if not languages:
+        return True
+    return (language or "en").split("-")[0].split("_")[0].lower() in languages
 
 
 def resolve_kwargs(kwargs: dict | None, language: str) -> dict | None:
@@ -442,16 +445,15 @@ def resolve_kwargs(kwargs: dict | None, language: str) -> dict | None:
 def run_model(
     model_key: str,
     audio: np.ndarray,
-    session_dir: Path,
-    channel: str,
     language: str = "en",
 ) -> tuple[str, str | None]:
     """Dispatch on the registry. Returns (text, error). Any exception is
     caught so one broken runtime doesn't kill the rest of the matrix."""
     cfg = MODEL_REGISTRY[model_key]
+    lang = (language or "en").split("-")[0].split("_")[0].lower()
     try:
         if cfg["kind"] == "whisper":
-            return run_faster_whisper(audio, cfg["fw_id"]), None
+            return run_faster_whisper(audio, cfg["fw_id"], language=lang), None
         elif cfg["kind"] == "nemo":
             return run_nemo_asr(
                 audio,
@@ -461,8 +463,6 @@ def run_model(
                 ),
                 chunk_seconds=cfg.get("chunk_seconds", 30.0),
             ), None
-        elif cfg["kind"] == "live_transcript":
-            return run_live_transcript(session_dir, channel), None
         else:
             raise ValueError(f"Unknown kind: {cfg['kind']}")
     except Exception as exc:
@@ -535,6 +535,126 @@ def load_session(session_dir: Path) -> Session:
 
 
 # ──────────────────────────────────────────────
+# One benchmark cell (model × channel)
+# ──────────────────────────────────────────────
+#
+# Every cell runs in its own subprocess. That costs a few seconds of
+# interpreter and model start-up, but it buys two things that matter more:
+#
+#   * Honest peak-RSS numbers. `ru_maxrss` is a monotonic high-water mark
+#     for the whole process, so running several models in one process gives
+#     every model after the first the peak of the largest one seen so far.
+#     A fresh process per cell is the only way to attribute memory.
+#   * Isolation. NeMo in particular does not reliably free model memory,
+#     so a long matrix in one process slowly starves the machine.
+
+
+def bench_cell(
+    session: "Session",
+    model_key: str,
+    channel: str,
+    language: str,
+    run_dir: Path,
+) -> "ModelRun":
+    """Transcribe one channel with one model and score it."""
+    audio = load_mono_16k(session.channels[channel])
+    start = time.perf_counter()
+    text, err = run_model(model_key, audio, language)
+    wall = time.perf_counter() - start
+
+    audio_seconds = len(audio) / TARGET_SR
+    accuracy = None
+    if channel in session.references and not err:
+        accuracy = score_transcript(text, session.references[channel], language)
+
+    run = ModelRun(
+        model_id=model_key,
+        channel=channel,
+        audio_seconds=audio_seconds,
+        wall_seconds=wall,
+        rtf=wall / audio_seconds if audio_seconds > 0 else 0.0,
+        peak_rss_mb=peak_rss_mb(),
+        text=text,
+        error=err,
+        accuracy=accuracy,
+    )
+    write_cell(run, run_dir)
+    return run
+
+
+def cell_paths(run_dir: Path, model_key: str, channel: str) -> tuple[Path, Path]:
+    model_dir = run_dir / model_key
+    return model_dir / f"{channel}.txt", model_dir / f"{channel}.metrics.json"
+
+
+def write_cell(run: "ModelRun", run_dir: Path) -> None:
+    out_path, metrics_path = cell_paths(run_dir, run.model_id, run.channel)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(run.text or "", encoding="utf-8")
+    metrics_path.write_text(
+        json.dumps(run.to_json(), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def bench_cell_subprocess(
+    session: "Session",
+    model_key: str,
+    channel: str,
+    language: str,
+    run_dir: Path,
+) -> "ModelRun":
+    """Run one cell in a fresh interpreter, then read back what it wrote.
+
+    The child writes the same files the in-process path does, so it is the
+    single source of truth for the result; we only parse them back so the
+    summary table can be printed here.
+    """
+    _, metrics_path = cell_paths(run_dir, model_key, channel)
+    metrics_path.unlink(missing_ok=True)
+
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--session", str(session.path),
+        "--worker", model_key, channel,
+        "--language", language,
+        "--run-name", run_dir.name,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    if not metrics_path.exists():
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        detail = tail[-1] if tail else f"exit code {proc.returncode}"
+        return ModelRun(
+            model_id=model_key, channel=channel, audio_seconds=0.0,
+            wall_seconds=0.0, rtf=0.0, peak_rss_mb=0.0, text="",
+            error=f"worker failed: {detail}", accuracy=None,
+        )
+
+    data = json.loads(metrics_path.read_text(encoding="utf-8"))
+    text_path, _ = cell_paths(run_dir, model_key, channel)
+    return ModelRun(
+        model_id=data["model_id"],
+        channel=data["channel"],
+        audio_seconds=data["audio_seconds"],
+        wall_seconds=data["wall_seconds"],
+        rtf=data["rtf"],
+        peak_rss_mb=data["peak_rss_mb"],
+        text=text_path.read_text(encoding="utf-8") if text_path.exists() else "",
+        error=data.get("error"),
+        accuracy=data.get("accuracy"),
+    )
+
+
+def worker_main(args) -> int:
+    """Internal entry point: run exactly one cell and write its files."""
+    model_key, channel = args.worker
+    session = load_session(args.session.expanduser().resolve())
+    run_dir = Path(__file__).resolve().parent / "runs" / args.run_name
+    bench_cell(session, model_key, channel, args.language or session.language, run_dir)
+    return 0
+
+
+# ──────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────
 
@@ -551,10 +671,17 @@ def main() -> int:
     ap.add_argument(
         "--models",
         nargs="+",
-        default=[k for k in MODEL_REGISTRY if k != "parakeet-live"],
+        default=list(MODEL_REGISTRY),
         choices=list(MODEL_REGISTRY.keys()),
-        help="Which models to run. Default: all real ASR models "
-             "(`parakeet-live` only applies to app-recorded sessions).",
+        help="Which models to run. Default: all of them. Models that "
+             "don't support the session language are skipped.",
+    )
+    ap.add_argument(
+        "--ignore-language-support",
+        action="store_true",
+        help="Run models even on languages they don't claim to support. "
+             "Useful to see what an English-only model does with German, "
+             "but the resulting WER says nothing about model quality.",
     )
     ap.add_argument(
         "--channels",
@@ -574,7 +701,24 @@ def main() -> int:
         default=None,
         help="Sub-directory under runs/. Default: <session>_<timestamp>.",
     )
+    ap.add_argument(
+        "--in-process",
+        action="store_true",
+        help="Run models in this process instead of one subprocess each. "
+             "Faster for a single model, but peak-RSS figures become "
+             "meaningless from the second model onwards (see --worker).",
+    )
+    ap.add_argument(
+        "--worker",
+        nargs=2,
+        metavar=("MODEL", "CHANNEL"),
+        default=None,
+        help=argparse.SUPPRESS,  # internal: run one cell, emit JSON
+    )
     args = ap.parse_args()
+
+    if args.worker:
+        return worker_main(args)
 
     session_dir: Path = args.session.expanduser().resolve()
     try:
@@ -603,62 +747,42 @@ def main() -> int:
         f"reference={'yes' if session.has_reference else 'no'})"
     )
 
-    # Pre-load every channel once so we amortise the decode cost across
-    # all models in the matrix.
-    channel_audio: dict[str, np.ndarray] = {}
-    for ch in selected:
-        path = session.channels[ch]
-        console.print(f"[cyan]Loading[/cyan] {path.name} ({path.stat().st_size / 1e6:.1f} MB)…")
-        channel_audio[ch] = load_mono_16k(path)
-        console.print(f"  → {len(channel_audio[ch]) / TARGET_SR:.1f}s at 16 kHz mono")
+    models = list(args.models)
+    if not args.ignore_language_support:
+        skipped = [m for m in models if not supports_language(m, language)]
+        models = [m for m in models if supports_language(m, language)]
+        for m in skipped:
+            console.print(
+                f"[yellow]skip {m}: no support for '{language}' "
+                f"(--ignore-language-support to run anyway)[/yellow]"
+            )
+    if not models:
+        console.print(f"[red]No selected model supports '{language}'.[/red]")
+        return 1
 
+    # Audio is loaded inside each cell rather than once up front: with
+    # subprocess isolation the parent never touches it, and a 16 kHz decode
+    # is negligible next to model start-up.
     results: list[ModelRun] = []
 
-    for model_key in args.models:
-        for ch, audio in channel_audio.items():
-            model_dir = run_dir / model_key
-            model_dir.mkdir(exist_ok=True)
-            out_path = model_dir / f"{ch}.txt"
-            metrics_path = model_dir / f"{ch}.metrics.json"
-
+    for model_key in models:
+        for ch in selected:
             console.print(f"\n[bold magenta]▶ {model_key} / {ch}[/bold magenta]")
-            start = time.perf_counter()
-            rss_before = peak_rss_mb()
-            text, err = run_model(model_key, audio, session_dir, ch, language)
-            wall = time.perf_counter() - start
-            rss_after = peak_rss_mb()
-
-            audio_seconds = len(audio) / TARGET_SR
-            accuracy = None
-            if ch in session.references and not err:
-                accuracy = score_transcript(text, session.references[ch], language)
-
-            run = ModelRun(
-                model_id=model_key,
-                channel=ch,
-                audio_seconds=audio_seconds,
-                wall_seconds=wall,
-                rtf=wall / audio_seconds if audio_seconds > 0 else 0.0,
-                peak_rss_mb=max(rss_before, rss_after),
-                text=text,
-                error=err,
-                accuracy=accuracy,
-            )
+            if args.in_process:
+                run = bench_cell(session, model_key, ch, language, run_dir)
+            else:
+                run = bench_cell_subprocess(session, model_key, ch, language, run_dir)
             results.append(run)
 
-            out_path.write_text(text or "", encoding="utf-8")
-            metrics_path.write_text(
-                json.dumps(run.to_json(), indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-
-            if err:
-                console.print(f"[red]  {err}[/red]")
+            if run.error:
+                console.print(f"[red]  {run.error}[/red]")
             else:
-                wer_note = f" · WER {accuracy['wer']:.1%}" if accuracy else ""
+                acc = run.accuracy
+                wer_note = f" · WER {acc['wer']:.1%}" if acc else ""
                 console.print(
-                    f"  [green]done[/green] in {wall:.1f}s  "
+                    f"  [green]done[/green] in {run.wall_seconds:.1f}s  "
                     f"(RTF {run.rtf:.2f} · "
-                    f"{len(text.split())} words · "
+                    f"{len(run.text.split())} words · "
                     f"peak RSS {run.peak_rss_mb:.0f} MB{wer_note})"
                 )
 
@@ -718,7 +842,10 @@ def main() -> int:
                 "run_name": run_name,
                 "session": str(session_dir),
                 "language": language,
-                "models": list(args.models),
+                "models": models,
+                "model_labels": {
+                    m: MODEL_REGISTRY[m]["label"] for m in models
+                },
                 "channels": selected,
                 "has_reference": session.has_reference,
                 "session_manifest": session.manifest,

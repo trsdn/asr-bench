@@ -5,10 +5,11 @@ Build a side-by-side Markdown report from a bench run.
 
 Reads `runs/<run-name>/*/<channel>.txt` + `*.metrics.json`, writes
 `runs/<run-name>/comparison.md` with an accuracy ranking (when the
-session had a reference transcript), a speed/RAM summary, a hallucination
-heuristic for known failure modes (repeated phrases, Whisper's signature
-"Thank you for watching" ghosts), and side-by-side transcript previews
-against the ground truth.
+session had a reference transcript), a speed/RAM summary, the
+diarisation ranking if `diarize.py` wrote one into the same run, a
+hallucination heuristic for known failure modes (repeated phrases,
+Whisper's signature "Thank you for watching" ghosts), and side-by-side
+transcript previews against the ground truth.
 """
 
 from __future__ import annotations
@@ -92,6 +93,14 @@ def load_metrics(run_dir: Path) -> list[dict]:
     return out
 
 
+def load_diarization(run_dir: Path) -> list[dict]:
+    """Read diarize.py's summary from the same run directory, if it ran."""
+    summary = run_dir / "diarization" / "summary.json"
+    if not summary.exists():
+        return []
+    return json.loads(summary.read_text(encoding="utf-8")).get("runs", [])
+
+
 def build_report(run_dir: Path) -> str:
     records = load_metrics(run_dir)
     if not records:
@@ -157,6 +166,45 @@ def build_report(run_dir: Path) -> str:
                 f"{(r.get('error') or '') or '—'} |"
             )
     lines.append("")
+
+    # ──── Diarisation ────
+    diarization = load_diarization(run_dir)
+    if diarization:
+        lines.append("## Diarisation (who spoke when)\n")
+        lines.append(
+            "Ranked by DER, best first. DER counts missed speech, false "
+            "alarms and speaker confusion as a fraction of reference "
+            "speech, after mapping the system's arbitrary speaker labels "
+            "onto the real ones and excluding a 0.25 s collar around each "
+            "reference boundary.\n"
+        )
+        lines.append(
+            "| Backend | Channel | Speakers | DER | Miss | False alarm | "
+            "Confusion | Wall | Error |"
+        )
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---|")
+
+        def pct(acc: dict | None, key: str) -> str:
+            return f"{acc[key]:.1%}" if acc and key in acc else "—"
+
+        for d in sorted(
+            diarization,
+            key=lambda x: (
+                x["channel"],
+                (x.get("accuracy") or {}).get("der", 9.9),
+            ),
+        ):
+            acc = d.get("accuracy")
+            found = d.get("speakers_found", 0)
+            expected = (acc or {}).get("reference_speakers")
+            speakers = f"{found}" + (f" / {expected}" if expected else "")
+            lines.append(
+                f"| `{d['backend']}` | {d['channel']} | {speakers} | "
+                f"**{pct(acc, 'der')}** | {pct(acc, 'miss')} | "
+                f"{pct(acc, 'false_alarm')} | {pct(acc, 'confusion')} | "
+                f"{d['wall_seconds']:.1f}s | {(d.get('error') or '—')} |"
+            )
+        lines.append("")
 
     # ──── Hallucination heuristics ────
     lines.append("## Hallucination / degeneration heuristics\n")

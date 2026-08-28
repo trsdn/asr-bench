@@ -1,5 +1,5 @@
 """
-score.py — WER / CER against the synthetic ground truth.
+score.py — transcription (WER/CER) and diarisation (DER) metrics.
 
 Scoring transcripts fairly is mostly a normalisation problem. A model
 that writes "120 Millisekunden" is not wrong just because the reference
@@ -22,6 +22,9 @@ are reported side by side instead of one authoritative score.
 No hard third-party dependency: `jiwer` and `num2words` are used when
 installed, otherwise the equivalent logic here takes over, so the
 benchmark still produces error rates on a machine with no network.
+
+`diarization_error_rate` scores "who spoke when" the same way, against
+the speaker-labelled turns in a session's `reference.json`.
 """
 
 from __future__ import annotations
@@ -285,4 +288,177 @@ def score(hypothesis: str, reference: str, lang: str = "en") -> dict | None:
         "insertions": int(ins),
         "reference_words": len(ref.split()),
         "hypothesis_words": len(hyp.split()),
+    }
+
+
+# ──────────────────────────────────────────────
+# Diarisation: DER
+# ──────────────────────────────────────────────
+#
+# Diarisation output is a set of (start, end, speaker) turns, and the
+# speaker labels are arbitrary — a system that segments perfectly but
+# calls the speakers "3, 1, 2" instead of "a, b, c" is not wrong. So the
+# metric first finds the best one-to-one mapping between hypothesis and
+# reference labels, then counts errors on a fixed frame grid:
+#
+#   DER = (missed speech + false alarm + speaker confusion) / total
+#         reference speech
+#
+# Frames within a `collar` of a reference boundary are excluded. That is
+# the NIST convention and it exists because the "true" moment a word
+# starts is not annotatable to better than ~100 ms — without it every
+# system is punished for its boundaries being a few frames off rather
+# than for getting speakers wrong.
+#
+# Reference frames may hold more than one speaker (our conversations
+# contain deliberate overlaps), and DER counts those: a system that
+# outputs one speaker where two are talking takes a miss for the second.
+
+MAX_EXHAUSTIVE_LABELS = 7
+
+
+def _frame_labels(
+    segments: list[dict], frames: int, frame_seconds: float
+) -> list[set]:
+    """Turn (start, end, speaker) turns into a per-frame set of speakers."""
+    grid: list[set] = [set() for _ in range(frames)]
+    for seg in segments:
+        start = max(0, int(float(seg["start"]) / frame_seconds))
+        end = min(frames, int(round(float(seg["end"]) / frame_seconds)))
+        speaker = seg["speaker"]
+        for i in range(start, end):
+            grid[i].add(speaker)
+    return grid
+
+
+def _scored_mask(
+    reference: list[dict], frames: int, frame_seconds: float, collar: float
+) -> list[bool]:
+    """False for frames sitting within `collar` of a reference boundary."""
+    mask = [True] * frames
+    if collar <= 0:
+        return mask
+    pad = int(round(collar / frame_seconds))
+    for seg in reference:
+        for boundary in (float(seg["start"]), float(seg["end"])):
+            centre = int(boundary / frame_seconds)
+            for i in range(max(0, centre - pad), min(frames, centre + pad + 1)):
+                mask[i] = False
+    return mask
+
+
+def _best_mapping(
+    ref_grid: list[set],
+    hyp_grid: list[set],
+    mask: list[bool],
+    ref_labels: list,
+    hyp_labels: list,
+) -> dict:
+    """One-to-one hypothesis→reference label mapping maximising the number
+    of correctly attributed frames.
+
+    Exhaustive for the handful of speakers a conversation actually has;
+    greedy beyond that, because the number of injective mappings grows
+    factorially and no realistic session needs it."""
+    import itertools
+
+    # Frames where each (hyp, ref) pair co-occurs — the overlap matrix
+    # the assignment is chosen from.
+    overlap: dict[tuple, int] = {}
+    for i, keep in enumerate(mask):
+        if not keep:
+            continue
+        for h in hyp_grid[i]:
+            for r in ref_grid[i]:
+                overlap[(h, r)] = overlap.get((h, r), 0) + 1
+
+    if not overlap:
+        return {}
+
+    if max(len(ref_labels), len(hyp_labels)) <= MAX_EXHAUSTIVE_LABELS:
+        best_score, best_map = -1, {}
+        # Map the shorter list onto permutations of the longer one so
+        # every candidate mapping stays one-to-one.
+        if len(hyp_labels) <= len(ref_labels):
+            for perm in itertools.permutations(ref_labels, len(hyp_labels)):
+                mapping = dict(zip(hyp_labels, perm))
+                sc = sum(overlap.get((h, r), 0) for h, r in mapping.items())
+                if sc > best_score:
+                    best_score, best_map = sc, mapping
+        else:
+            for perm in itertools.permutations(hyp_labels, len(ref_labels)):
+                mapping = {h: r for h, r in zip(perm, ref_labels)}
+                sc = sum(overlap.get((h, r), 0) for h, r in mapping.items())
+                if sc > best_score:
+                    best_score, best_map = sc, mapping
+        return best_map
+
+    mapping, used_ref, used_hyp = {}, set(), set()
+    for (h, r), _count in sorted(overlap.items(), key=lambda kv: -kv[1]):
+        if h in used_hyp or r in used_ref:
+            continue
+        mapping[h] = r
+        used_hyp.add(h)
+        used_ref.add(r)
+    return mapping
+
+
+def diarization_error_rate(
+    reference: list[dict],
+    hypothesis: list[dict],
+    collar: float = 0.25,
+    frame_seconds: float = 0.01,
+) -> dict | None:
+    """Score a diarisation hypothesis against reference turns.
+
+    Both arguments are lists of dicts with `speaker`, `start`, `end`.
+    Returns DER plus its three components, all as fractions of reference
+    speech, or None when the reference contains no speech."""
+    if not reference:
+        return None
+
+    end = max(
+        max(float(s["end"]) for s in reference),
+        max((float(s["end"]) for s in hypothesis), default=0.0),
+    )
+    frames = int(round(end / frame_seconds)) + 1
+
+    ref_grid = _frame_labels(reference, frames, frame_seconds)
+    hyp_grid = _frame_labels(hypothesis, frames, frame_seconds)
+    mask = _scored_mask(reference, frames, frame_seconds, collar)
+
+    ref_labels = sorted({s["speaker"] for s in reference}, key=str)
+    hyp_labels = sorted({s["speaker"] for s in hypothesis}, key=str)
+    mapping = _best_mapping(ref_grid, hyp_grid, mask, ref_labels, hyp_labels)
+
+    total = miss = false_alarm = confusion = 0
+    for i, keep in enumerate(mask):
+        if not keep:
+            continue
+        ref_set = ref_grid[i]
+        hyp_set = hyp_grid[i]
+        total += len(ref_set)
+        if not ref_set and not hyp_set:
+            continue
+        mapped = {mapping.get(h) for h in hyp_set} - {None}
+        correct = len(mapped & ref_set)
+        miss += max(0, len(ref_set) - len(hyp_set))
+        false_alarm += max(0, len(hyp_set) - len(ref_set))
+        confusion += min(len(ref_set), len(hyp_set)) - correct
+
+    if total == 0:
+        return None
+
+    errors = miss + false_alarm + confusion
+    return {
+        "der": round(errors / total, 4),
+        "miss": round(miss / total, 4),
+        "false_alarm": round(false_alarm / total, 4),
+        "confusion": round(confusion / total, 4),
+        "reference_speakers": len(ref_labels),
+        "hypothesis_speakers": len(hyp_labels),
+        "scored_seconds": round(sum(1 for k in mask if k) * frame_seconds, 2),
+        "reference_speech_seconds": round(total * frame_seconds, 2),
+        "collar": collar,
+        "mapping": {str(h): str(r) for h, r in sorted(mapping.items(), key=str)},
     }
