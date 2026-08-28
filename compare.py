@@ -206,6 +206,42 @@ def build_report(run_dir: Path) -> str:
             )
         lines.append("")
 
+        overlapping = [
+            d for d in diarization if (d.get("accuracy") or {}).get("overlap")
+        ]
+        if overlapping:
+            share = (overlapping[0]["accuracy"]["overlap"] or {}).get(
+                "share_of_speech"
+            )
+            lines.append("### Overlapping speech\n")
+            lines.append(
+                "Restricted to frames where two or more people speak at once "
+                f"({share:.1%} of reference speech here). The collar is not "
+                "applied: overlap sits on speaker boundaries, so a collar "
+                "would mask exactly what is being measured. `Recall` is the "
+                "share of overlapped seconds where the system reported more "
+                "than one speaker at all — a clustering backend assigns one "
+                "label per window and so cannot represent simultaneity by "
+                "construction.\n"
+            )
+            lines.append(
+                "| Backend | Channel | Overlap | DER | Miss | Confusion | "
+                "Recall |"
+            )
+            lines.append("|---|---|---:|---:|---:|---:|---:|")
+            for d in sorted(
+                overlapping,
+                key=lambda x: (x["channel"], x["accuracy"]["overlap"]["der"]),
+            ):
+                ov = d["accuracy"]["overlap"]
+                lines.append(
+                    f"| `{d['backend']}` | {d['channel']} | "
+                    f"{ov['seconds']:.1f}s | **{pct(ov, 'der')}** | "
+                    f"{pct(ov, 'miss')} | {pct(ov, 'confusion')} | "
+                    f"{pct(ov, 'detection_recall')} |"
+                )
+            lines.append("")
+
     # ──── Hallucination heuristics ────
     lines.append("## Hallucination / degeneration heuristics\n")
     lines.append("| Model | Channel | Whisper ghosts | Top-repeated 5-gram | × |")

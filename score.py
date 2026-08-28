@@ -403,6 +403,32 @@ def _best_mapping(
     return mapping
 
 
+def _count_errors(
+    ref_grid: list[set],
+    hyp_grid: list[set],
+    mapping: dict,
+    selected: list[bool],
+) -> tuple[int, int, int, int]:
+    """Sum reference speaker-seconds and the three DER error types over
+    the frames flagged in `selected`. Counts are in speaker-frames, so a
+    frame with two active speakers contributes two."""
+    total = miss = false_alarm = confusion = 0
+    for i, keep in enumerate(selected):
+        if not keep:
+            continue
+        ref_set = ref_grid[i]
+        hyp_set = hyp_grid[i]
+        total += len(ref_set)
+        if not ref_set and not hyp_set:
+            continue
+        mapped = {mapping.get(h) for h in hyp_set} - {None}
+        correct = len(mapped & ref_set)
+        miss += max(0, len(ref_set) - len(hyp_set))
+        false_alarm += max(0, len(hyp_set) - len(ref_set))
+        confusion += min(len(ref_set), len(hyp_set)) - correct
+    return total, miss, false_alarm, confusion
+
+
 def diarization_error_rate(
     reference: list[dict],
     hypothesis: list[dict],
@@ -413,7 +439,15 @@ def diarization_error_rate(
 
     Both arguments are lists of dicts with `speaker`, `start`, `end`.
     Returns DER plus its three components, all as fractions of reference
-    speech, or None when the reference contains no speech."""
+    speech, or None when the reference contains no speech.
+
+    When the reference has overlapping speech, an `overlap` block reports
+    the same breakdown restricted to frames where two or more reference
+    speakers are active. That sub-score deliberately ignores the collar:
+    the collar masks a window either side of every reference boundary,
+    and overlap regions sit exactly on those boundaries, so applying it
+    would erase most of the very frames the sub-score exists to measure.
+    """
     if not reference:
         return None
 
@@ -431,26 +465,14 @@ def diarization_error_rate(
     hyp_labels = sorted({s["speaker"] for s in hypothesis}, key=str)
     mapping = _best_mapping(ref_grid, hyp_grid, mask, ref_labels, hyp_labels)
 
-    total = miss = false_alarm = confusion = 0
-    for i, keep in enumerate(mask):
-        if not keep:
-            continue
-        ref_set = ref_grid[i]
-        hyp_set = hyp_grid[i]
-        total += len(ref_set)
-        if not ref_set and not hyp_set:
-            continue
-        mapped = {mapping.get(h) for h in hyp_set} - {None}
-        correct = len(mapped & ref_set)
-        miss += max(0, len(ref_set) - len(hyp_set))
-        false_alarm += max(0, len(hyp_set) - len(ref_set))
-        confusion += min(len(ref_set), len(hyp_set)) - correct
-
+    total, miss, false_alarm, confusion = _count_errors(
+        ref_grid, hyp_grid, mapping, mask
+    )
     if total == 0:
         return None
 
     errors = miss + false_alarm + confusion
-    return {
+    result = {
         "der": round(errors / total, 4),
         "miss": round(miss / total, 4),
         "false_alarm": round(false_alarm / total, 4),
@@ -462,3 +484,29 @@ def diarization_error_rate(
         "collar": collar,
         "mapping": {str(h): str(r) for h, r in sorted(mapping.items(), key=str)},
     }
+
+    overlap_frames = [len(s) >= 2 for s in ref_grid]
+    overlap_count = sum(overlap_frames)
+    if overlap_count:
+        o_total, o_miss, o_fa, o_conf = _count_errors(
+            ref_grid, hyp_grid, mapping, overlap_frames
+        )
+        # How much of the overlap did the system even represent as
+        # simultaneous speech? A clustering backend assigns one speaker
+        # per window, so this is structurally 0 for it however good its
+        # boundaries are — which is the point of reporting it separately.
+        detected = sum(
+            1 for i, is_ov in enumerate(overlap_frames) if is_ov and len(hyp_grid[i]) >= 2
+        )
+        result["overlap"] = {
+            "seconds": round(overlap_count * frame_seconds, 2),
+            "share_of_speech": round(overlap_count / max(1, sum(1 for s in ref_grid if s)), 4),
+            "der": round((o_miss + o_fa + o_conf) / o_total, 4) if o_total else None,
+            "miss": round(o_miss / o_total, 4) if o_total else None,
+            "false_alarm": round(o_fa / o_total, 4) if o_total else None,
+            "confusion": round(o_conf / o_total, 4) if o_total else None,
+            "detected_seconds": round(detected * frame_seconds, 2),
+            "detection_recall": round(detected / overlap_count, 4),
+        }
+
+    return result

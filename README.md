@@ -32,6 +32,7 @@ Diarisation:
 | Backend | Runtime | Notes |
 |---|---|---|
 | `sortformer` | NeMo | `nvidia/diar_sortformer_4spk-v1` (2025), end-to-end, hard limit of 4 speakers |
+| `sortformer-streaming` | NeMo | `nvidia/diar_streaming_sortformer_4spk-v2` (2025), the streaming successor — same 4-speaker limit, far cheaper, and on these sessions the most consistent of the three |
 | `titanet` | NeMo | TitaNet-Large embeddings + agglomerative clustering — the classic baseline |
 
 Models declare which languages they support, and `bench.py` skips the pairings that make no sense (running an English-only model on a German session produces garbage that looks like model failure but is really operator error). `--ignore-language-support` forces them to run anyway.
@@ -58,7 +59,7 @@ cp .env.example .env
 
 ## 1. Write a conversation
 
-A script is a YAML file listing speakers and turns. See [`conversations/standup-de.yaml`](conversations/standup-de.yaml) (German, 3 speakers) and [`conversations/support-call-en.yaml`](conversations/support-call-en.yaml) (English, 2 speakers).
+A script is a YAML file listing speakers and turns. See [`conversations/standup-de.yaml`](conversations/standup-de.yaml) (German, 3 speakers), [`conversations/support-call-en.yaml`](conversations/support-call-en.yaml) (English, 2 speakers) and [`conversations/crosstalk-de.yaml`](conversations/crosstalk-de.yaml) (German, 4 speakers, 9.3 % overlapping speech).
 
 ```yaml
 name: standup-de
@@ -81,6 +82,8 @@ turns:
 Voices are auto-assigned per language and guaranteed distinct — two speakers sharing a voice would make speaker-attribution numbers meaningless. `--list-voices` shows what's installed for the script's language.
 
 Write scripts that stress what you care about: loanwords, numbers, proper nouns, spelled-out email addresses, cross-talk. Those are where models actually differ.
+
+Overlap deserves its own script rather than a sprinkling of negative gaps. `standup-de` has 0.55 s of overlap in 85 s of speech — 0.6 %, effectively none, where real meetings run 5–20 %. `crosstalk-de` is built for it: interruptions mid-sentence, two people answering at once, back-channels, and four speakers to sit right on Sortformer's limit.
 
 ## 2. Synthesise sessions
 
@@ -144,6 +147,32 @@ The speaker count is read from `session.json` and handed to backends that accept
 
 Only the `mixed` channel is a real diarisation task. The isolated per-speaker channels contain one voice each; running them is a sanity check (a backend that finds three speakers in a single-speaker track has a problem).
 
+### Tuning
+
+Every knob in the `titanet` pipeline is a CLI flag, with the defaults shown:
+
+| Flag | Default | What it does |
+|---|---:|---|
+| `--window` | 1.5 s | length of each embedded window — longer is more reliable per window, but cannot resolve short turns |
+| `--hop` | 0.75 s | step between windows; the resolution limit on turn boundaries |
+| `--cluster-threshold` | 0.55 | cosine distance at which clusters stop merging. **Only consulted when `--num-speakers 0`** — if the count is given, the count decides when merging stops and this value is inert |
+| `--min-turn` | 0.3 s | drop turns shorter than this |
+| `--vad-db` | −40 dB | below this, a window counts as silence |
+
+`sortformer` and `sortformer-streaming` have no knobs at all — audio in, spans out. All of the above applies to `titanet` only.
+
+`--sweep` runs a coordinate-descent search over these:
+
+```sh
+uv run python diarize.py --sweep \
+    --sweep-sessions sessions/standup-de__clean sessions/standup-de__phone \
+                     sessions/standup-de__noisy sessions/support-call-en__clean
+```
+
+**Sweep across several sessions or not at all.** Tuned on `standup-de__clean` alone, the search reports DER 27.3 % → 3.6 %; those same values then score 58.8 % on `standup-de__phone`, where they find 32 speakers in a 3-speaker recording. Scored honestly across four sessions the whole search is worth 12.4 % → 11.7 %, and the defaults for `--window` and `--hop` come out already optimal. That is the reason `--sweep` refuses to take a single session as the objective, and a failed session is scored as DER 1.0 so a configuration cannot win by collapsing on hard input.
+
+The one change with cross-session evidence behind it is the VAD threshold, which is why the default is −40 dB rather than the −33 dB this repo started with.
+
 ## 5. Compare
 
 ```sh
@@ -154,7 +183,7 @@ Writes `runs/<run-name>/comparison.md`:
 
 - **accuracy ranking** — WER, CER, and substitution/deletion/insertion counts, best first
 - speed and memory table (wall time, realtime factor, peak RAM)
-- **diarisation ranking** — DER split into missed speech, false alarm and speaker confusion (when `diarize.py` ran on this run)
+- **diarisation ranking** — DER split into missed speech, false alarm and speaker confusion (when `diarize.py` ran on this run), plus a separate table restricted to overlapping speech if the session contains any
 - hallucination heuristics (Whisper ghost phrases like *"Thank you for watching"* / *"Bitte abonnieren"*, plus the most-repeated 5-gram — high counts flag loop degeneration)
 - side-by-side transcript previews with the ground truth as the first column
 
@@ -183,6 +212,14 @@ Speaker labels are arbitrary, so the scorer first picks the one-to-one mapping b
 
 Reference frames can hold more than one speaker, because the conversation scripts contain deliberate overlaps, and DER counts those: a backend that reports one speaker while two people are talking takes a miss for the second. The three components are reported separately, which is what tells you *how* a backend fails — all-miss means the VAD is too conservative, all-confusion means the embeddings can't separate these voices.
 
+### Diarisation: overlapping speech
+
+The global DER hides overlap almost completely. In a session with 9 % overlapped speech, a backend that never reports two people at once still only forfeits those 9 % — it can post a respectable overall number while being structurally blind to crosstalk. So the scorer also reports a separate block restricted to frames where two or more people speak, with its own DER, miss, confusion and a `detection_recall`: the share of overlapped time where the system reported more than one speaker at all.
+
+The 0.25 s collar is deliberately *not* applied there. Overlap sits on speaker boundaries by definition, so a collar would mask exactly the frames being measured.
+
+One caveat on reading `detection_recall` for `titanet`: a clustering backend assigns one label per window, so it cannot represent simultaneity. Any recall it shows comes from adjacent overlapping *windows* landing on different labels, which produces overlapping turns as a side effect of the windowing. It is an artefact, not detection.
+
 ## Why these models
 
 They are open-weight, run locally, and represent genuinely different architectures — so the comparison teaches you something instead of benchmarking minor variants of the same approach.
@@ -191,7 +228,7 @@ They are open-weight, run locally, and represent genuinely different architectur
 - **Canary** is attention-encoder-decoder but trained with explicit non-speech / noise tokens; claims low hallucination on silence *and* multilingual coverage. `canary-180m-flash` is the same idea at a fraction of the size, which is the interesting question for anyone running on a laptop: how much accuracy does the small model actually give up?
 - **Whisper Large-v3** is the reference "big autoregressive decoder" — generous multilingual coverage but the well-known hallucination tendency on silence, music and cross-talk. **Turbo** keeps the encoder and cuts the decoder to 4 layers; **Distil** is a distilled English-only variant. Both trade accuracy for speed, and the point of the harness is to put a number on that trade rather than repeating the claim.
 
-For diarisation, **Sortformer** (2025) is end-to-end: no VAD to tune, no clustering threshold to fiddle with, but a hard limit of 4 speakers. **TitaNet + clustering** is the pipeline it is trying to replace, and it is here as the baseline — if the end-to-end model can't beat a threshold-tuned classic on your audio, that is worth knowing before you adopt it.
+For diarisation, **Sortformer** (2025) is end-to-end: no VAD to tune, no clustering threshold to fiddle with, but a hard limit of 4 speakers. Both the offline v1 and the **streaming v2** successor are here because they do not rank the same way — v2 is cheaper and steadier across sessions, v1 is stronger when it works, and neither wins everywhere. **TitaNet + clustering** is the pipeline they are trying to replace, and it is here as the baseline — if the end-to-end model can't beat a threshold-tuned classic on your audio, that is worth knowing before you adopt it. The end-to-end models can also report two people talking at once, which clustering cannot do at all.
 
 Transcription language is pinned from `session.json` for every model that accepts a hint (Canary's `source_lang`/`target_lang`, Whisper's `language`). Left to auto-detect, a model can lose an entire session to one bad guess in the first few seconds, which measures language ID rather than transcription.
 
@@ -227,20 +264,50 @@ Measured on an Apple Silicon laptop, `mixed` channel, `clean` profile, one subpr
 | canary-1b-v2 | 44 s | 0.54 | 8.5 GB | 13.5 % | 8.8 % |
 | whisper-large-v3 | 273 s | 3.42 | 6.2 GB | 43.9 % | 39.4 % |
 
-Diarisation, same sessions:
+Diarisation, same sessions plus a deliberately overlap-heavy one:
 
-| Backend | German (3 spk) | English (2 spk) |
-|---|---:|---:|
-| sortformer | 36.6 % DER | **0.3 % DER** |
-| titanet | **27.3 % DER** | 10.1 % DER |
+| Backend | German standup (3 spk) | English call (2 spk) | German crosstalk (4 spk) |
+|---|---:|---:|---:|
+| sortformer | 36.6 % DER | **0.3 % DER** | **0.3 % DER** |
+| sortformer-streaming | **1.5 % DER** | 1.7 % DER | 14.7 % DER |
+| titanet | 26.0 % DER | 8.8 % DER | 33.7 % DER |
 
-Three things in those tables are worth more than the ranking itself.
+**Overlapping speech** — `crosstalk-de`, 71 s, 4 speakers, 6.6 s (9.3 %) of genuinely simultaneous speech:
+
+| Backend | Overlap DER | Miss | Confusion | Detection recall |
+|---|---:|---:|---:|---:|
+| sortformer | **10.3 %** | 6.7 % | 2.9 % | 87.5 % |
+| sortformer-streaming | 19.1 % | 10.6 % | 8.5 % | 79.7 % |
+| titanet | 51.8 % | 36.8 % | 15.0 % | 27.1 % |
+
+Transcription on that same overlapping session, against the same models on the isolated single-speaker tracks:
+
+| Model | WER on `mixed` | WER on solo tracks | Cost of overlap |
+|---|---:|---:|---:|
+| whisper-large-v3 | **8.3 %** | 5.6 % | +2.8 |
+| whisper-large-v3-turbo | 11.3 % | 4.7 % | +6.6 |
+| parakeet-tdt-v3 | 24.0 % | 9.8 % | +14.2 |
+| canary-180m-flash | 40.7 % | 27.8 % | +12.9 |
+| canary-1b-v2 | 40.7 % | 16.9 % | +23.8 |
+| canary | 50.5 % | 63.0 % | −12.5 |
+
+(`parakeet-tdt-v2` and `distil-whisper-large-v3` are English-only and skipped on this German session. `canary` is the one model that scores *worse* on the isolated tracks than on the mixed one — those tracks are mostly silence, which is the input it degenerates on, so its overlap cost is not measurable this way.)
+
+Several things in those tables are worth more than the ranking itself.
 
 **No model wins both languages.** `parakeet-tdt-v3` is first on German and sixth on English; `canary` is first on English and fifth on German. Picking a model from an English leaderboard and deploying it on German is not sound, which is the whole reason this repo scores per language.
 
+**Overlap reorders the transcription ranking.** `parakeet-tdt-v3` wins the clean German session at 7.1 % and drops to fourth under crosstalk, giving up 14 points; `whisper-large-v3` gives up 3. A large autoregressive decoder with broad context turns out to degrade more gracefully when a second voice cuts in than a frame-synchronous transducer does — the reverse of the silence-hallucination story below. Neither architecture is simply better; they fail on different inputs, which is only visible if you test both.
+
 **whisper-large-v3 degenerates on the English session** — 43.9 % WER from 90 insertions, and an RTF of 3.42 rather than the 0.5 it manages elsewhere. The transcript is correct up to the last real words ("Thanks for calling.") and then invents about 78 more, ending in *"I love you too... I love you..."*. This is the well-known Whisper trailing-silence loop: the decoder is autoregressive, so once it starts a repetition it will happily continue and burn wall-clock doing it. `whisper-large-v3-turbo` on the identical audio stops cleanly. The repeated-n-gram column in the report flags it automatically — this is exactly the failure the heuristic exists for, and exactly the failure a transducer like Parakeet cannot have by construction.
 
-**Sortformer's DER swings from 0.3 % to 36.6 %.** Near-perfect on the two-speaker English call, worst-in-class on the three-speaker German one. Two causes stack: it is trained on English, and the German session has three macOS `say` voices. Measured directly, those voices sit at cosine distance 0.71–0.92 from each other while windows *within* one voice reach 0.38 — separable, but with far less margin than real speech. Miss and false-alarm rates stay near zero in both cases, so the voice activity detection is fine; the entire error is speaker confusion. Read the German diarisation numbers as a hard floor set by synthetic audio, not as the performance you would see on a real meeting.
+**A phantom speaker costs a real one.** On `standup-de` the reference is three speakers of 33.8 s, 30.3 s and 21.0 s. `sortformer` v1 returns 62.2 s, 0.4 s and 21.1 s — the 0.4 s cluster occupies a speaker slot, so the two largest speakers are merged into one. `titanet` produces the same 0.4 s fragment and the same merge. `sortformer-streaming` returns 33.7 s / 29.0 s / 21.0 s and scores 1.5 %. The failure is not that the voices are hard to tell apart, it is that a sub-second fragment is allowed to hold a slot; when it doesn't, the same audio separates almost perfectly. Checking the hypothesis speakers for one implausibly short cluster is the fastest diagnostic available, and it caught the same thing on `crosstalk-de/titanet` (1.5 s and 0.6 s fragments alongside a 38.8 s merge).
+
+An earlier version of this README explained the German diarisation gap as macOS `say` voices sitting too close together in embedding space. That was wrong. The voices are separable — `sortformer-streaming` separates them at 1.5 % DER, and auto-detect clustering separates them at 0.5 % confusion. The measurement that seemed to support it (between-speaker cosine distance 0.71–0.92 vs. 0.14–0.38 within) was real but did not explain the errors.
+
+**Only the end-to-end models detect overlap at all**, which follows from their design: they emit a per-speaker activity signal and can raise two at once. Clustering assigns exactly one label per window and cannot. That is the strongest architectural argument in these tables, and it is worth weighing against the 4-speaker ceiling both Sortformer variants have.
+
+**The streaming model is not simply the newer one.** It is the most consistent across sessions (1.5 / 1.7 / 14.7) and by far the cheapest — 3.2 s against 9.9 s for offline v1 on the same audio — but offline v1 is the better model when it works. Two of three sessions favour streaming, the overlap-heavy one strongly favours offline. Three sessions is not enough to settle that.
 
 Canary mangles the English technical vocabulary sprinkled through the German dialogue (*caching layer* → *kachin leier*), which is exactly the kind of failure the scripts are written to provoke.
 

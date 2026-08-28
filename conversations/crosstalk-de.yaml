@@ -1,0 +1,125 @@
+name: crosstalk-de
+language: de
+notes: >
+  Hitzige deutsche Projektdiskussion mit vier Sprechern und sehr viel
+  überlappender Sprache: Unterbrechungen mitten im Satz, Zwischenrufe,
+  zwei Leute die gleichzeitig antworten, kurzes Durcheinanderreden.
+
+  Existiert als Gegenstück zu `standup-de`, das mit 0,6 % Overlap
+  praktisch keiner ist. Echte Meetings liegen bei 5–20 %. Overlap trifft
+  beide Aufgaben unterschiedlich hart: die Transkription verliert die
+  überdeckten Wörter, die Diarisation muss zwei gleichzeitige Sprecher
+  überhaupt als zwei melden — was ein Clustering-Backend, das jedem
+  Fenster genau ein Label gibt, strukturell nicht kann.
+
+  Vier Sprecher testet zusätzlich Sortformers harte Grenze von vier.
+
+speakers:
+  - id: a
+    name: Nadia
+    rate: 195
+  - id: b
+    name: Tobias
+    rate: 180
+  - id: c
+    name: Sabine
+    rate: 200
+  - id: d
+    name: Jonas
+    rate: 175
+
+turns:
+  - speaker: a
+    text: "Also, wir müssen heute wirklich eine Entscheidung zum Deployment treffen."
+  - speaker: a
+    text: "Tobias, du hattest ja Bedenken wegen der Datenbank-Migration."
+    gap: 0.3
+
+  # b starts before a has finished
+  - speaker: b
+    text: "Ja, genau, und zwar erhebliche Bedenken."
+    gap: -0.6
+  - speaker: b
+    text: "Wenn wir das Schema ändern während die alten Worker noch laufen, dann haben wir ein Problem."
+    gap: 0.2
+
+  # c cuts in mid-sentence
+  - speaker: c
+    text: "Moment, das stimmt so nicht."
+    gap: -0.9
+  - speaker: c
+    text: "Die Worker lesen doch gar nicht direkt aus der Tabelle, die gehen über die API."
+    gap: 0.15
+
+  # two people answer at once
+  - speaker: b
+    text: "Nicht alle, der Batch-Job nicht."
+    gap: -0.5
+  - speaker: d
+    text: "Der Batch-Job liest direkt, das ist richtig."
+    gap: -1.1
+
+  - speaker: a
+    text: "Okay, einen nach dem anderen bitte."
+    gap: 0.4
+  - speaker: a
+    text: "Jonas, du sagst der Batch-Job liest direkt?"
+    gap: 0.2
+
+  - speaker: d
+    text: "Ja, aus historischen Gründen."
+    gap: 0.3
+  - speaker: d
+    text: "Der wurde nie auf die API umgestellt, weil die Performance nicht gereicht hat."
+    gap: 0.1
+
+  # overlapping agreement
+  - speaker: c
+    text: "Das wusste ich nicht."
+    gap: -0.45
+  - speaker: b
+    text: "Das meinte ich ja die ganze Zeit."
+    gap: -0.7
+
+  - speaker: a
+    text: "Gut, dann brauchen wir für den Batch-Job ein Wartungsfenster."
+    gap: 0.5
+
+  # rapid interruption chain
+  - speaker: b
+    text: "Oder wir stellen ihn endlich auf die API um."
+    gap: -0.55
+  - speaker: c
+    text: "Das dauert mindestens zwei Sprints."
+    gap: -0.8
+  - speaker: d
+    text: "Eher drei, mit dem Testen."
+    gap: -0.65
+
+  - speaker: a
+    text: "Also Wartungsfenster."
+    gap: 0.35
+  - speaker: a
+    text: "Ich schlage Samstag früh um sechs Uhr vor, da ist die Last am niedrigsten."
+    gap: 0.2
+
+  - speaker: d
+    text: "Samstag um sechs bin ich nicht da."
+    gap: -0.4
+  - speaker: c
+    text: "Ich könnte übernehmen, ich bin sowieso wach."
+    gap: 0.25
+
+  - speaker: b
+    text: "Dann machen wir es so, aber wir brauchen vorher einen sauberen Rollback-Plan."
+    gap: 0.3
+  - speaker: a
+    text: "Einverstanden. Sabine, schreibst du den Plan bis Donnerstag?"
+    gap: 0.25
+
+  - speaker: c
+    text: "Mache ich."
+    gap: 0.2
+  - speaker: a
+    text: "Perfekt, dann sind wir durch."
+    gap: 0.4
