@@ -64,6 +64,15 @@ SAY_DEFAULT_WPM = 175
 # Rate support for Piper and Kokoro is exactly that: same key, different
 # audio, so old entries have to be treated as misses rather than served.
 TTS_CACHE_VERSION = 2
+
+# Level increase applied to a turn that begins while the previous speaker
+# is still talking — the Lombard effect, which makes people talk louder
+# against competing speech. 3 dB sits in the middle of the range reported
+# for competing-talker conditions. This is deliberately a crude model:
+# real Lombard speech also raises F0 and tilts the spectrum upward, and
+# no TTS engine used here will do that on request, so overlapped speech
+# is still easier to separate than the real thing.
+LOMBARD_GAIN_DB = 3.0
 LEAD_IN = 0.5             # silence before the first turn
 TAIL = 0.8                # silence after the last turn
 
@@ -554,6 +563,10 @@ class Segment:
         }
 
 
+def _gain_db(audio: np.ndarray, db: float) -> np.ndarray:
+    return (audio * (10.0 ** (db / 20.0))).astype(np.float32)
+
+
 def build_timeline(
     conv: Conversation,
     voices: dict[str, str],
@@ -592,6 +605,12 @@ def build_timeline(
     segments: list[Segment] = []
     for turn, audio in rendered:
         start = max(0.0, cursor + turn.gap)
+        # A speaker who cuts in while someone else still holds the floor
+        # raises their voice. Summing both turns at their original level
+        # models two independent recordings rather than a contested
+        # floor, and makes the separation easier than it is in reality.
+        if start < cursor - 1e-6:
+            audio = _gain_db(audio, LOMBARD_GAIN_DB)
         offset = int(round(start * sr))
         duration = len(audio) / sr
         placements.append((turn, audio, offset))

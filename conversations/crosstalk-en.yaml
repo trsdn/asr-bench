@@ -1,0 +1,124 @@
+name: crosstalk-en
+language: en
+notes: >
+  Heated English incident review with four speakers and a lot of
+  overlapping speech: mid-sentence interruptions, one-word objections,
+  two people answering at once, a short stretch of everyone talking over
+  everyone.
+
+  The English counterpart to `crosstalk-de`, and the reason it exists:
+  overlap used to appear only in German, so any crosstalk result was
+  also a statement about one language and about the two engines that
+  have German voices. This script renders on all three engines, which
+  makes overlap crossable with the TTS axis.
+
+  Content is deliberately different from `crosstalk-de` rather than a
+  translation. A translated script would share sentence lengths and
+  turn boundaries, so the two would not be independent samples.
+
+  Four speakers also sits exactly on Sortformer's hard limit of four.
+
+speakers:
+  - id: a
+    name: Priya
+    gender: f
+    rate: 190
+  - id: b
+    name: Marcus
+    gender: m
+    rate: 175
+  - id: c
+    name: Elena
+    gender: f
+    rate: 200
+  - id: d
+    name: Tom
+    gender: m
+    rate: 170
+
+turns:
+  - speaker: a
+    text: "Right, let's go through what actually happened before we start assigning blame."
+  - speaker: a
+    text: "The alerts fired at eleven forty, and nobody acknowledged them for nineteen minutes."
+    gap: 0.3
+
+  # b starts before a has finished
+  - speaker: b
+    text: "That's not quite fair, I was already looking at it."
+    gap: -0.55
+  - speaker: b
+    text: "The pager went to the wrong rotation, so I only saw it in the channel."
+    gap: 0.2
+
+  # c cuts in mid-sentence
+  - speaker: c
+    text: "Wait, hold on."
+    gap: -0.7
+  - speaker: c
+    text: "The rotation was updated last week, I pushed that change myself."
+    gap: 0.15
+
+  # two people answer at once
+  - speaker: b
+    text: "Then it didn't take effect."
+    gap: -0.45
+  - speaker: d
+    text: "It did take effect, but only for the primary."
+    gap: -0.5
+
+  - speaker: a
+    text: "Okay, one at a time. Tom, finish that thought."
+    gap: 0.35
+  - speaker: d
+    text: "The secondary rotation still points at the old group, so the escalation never went anywhere."
+    gap: 0.3
+
+  - speaker: c
+    text: "So it is a config problem, not a people problem."
+    gap: 0.25
+
+  # b objects before c is done
+  - speaker: b
+    text: "It's both, honestly."
+    gap: -0.5
+  - speaker: b
+    text: "Even once I saw it, I couldn't tell whether the database or the queue was the cause."
+    gap: 0.2
+
+  # everyone at once
+  - speaker: a
+    text: "That's the dashboard problem again."
+    gap: -0.6
+  - speaker: c
+    text: "I said that in the last review."
+    gap: -0.8
+  - speaker: d
+    text: "We all said that in the last review."
+    gap: -0.65
+
+  - speaker: a
+    text: "Fine. Then let's write it down properly this time."
+    gap: 0.4
+  - speaker: a
+    text: "Two actions: fix the secondary rotation, and put queue depth on the main dashboard."
+    gap: 0.3
+
+  - speaker: d
+    text: "I'll take the rotation, that's a ten minute change."
+    gap: 0.25
+
+  # c and b overlap on the last item
+  - speaker: c
+    text: "And I'll do the dashboard, I know where that config lives."
+    gap: -0.4
+  - speaker: b
+    text: "Can we also add the queue alert threshold?"
+    gap: -0.35
+
+  - speaker: a
+    text: "Add it to the same ticket. Anything else before we close this out?"
+    gap: 0.35
+  - speaker: b
+    text: "No, that covers it."
+    gap: 0.3

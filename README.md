@@ -33,9 +33,28 @@ Transcription:
 | `kyutai-stt-2.6b` | transformers | English | `kyutai/stt-2.6b-en-trfs`. Streaming architecture; trained at 24 kHz, not 16 |
 | `moonshine-base` | transformers | English | 61M params — the small-and-fast end of the range |
 | `granite-speech-4.1` | transformers | English | IBM's audio LLM (2026) |
-| `voxtral-mini-3b` | transformers | multilingual | Mistral's audio LLM. No longer gated |
+| `voxtral-mini-3b` | transformers | multilingual | Mistral's audio LLM. **Blocked:** deadlocks on MPS (see below) |
 | `qwen2-audio-7b` | transformers | multilingual | Audio LLM, wired up but unverified |
 | `phi-4-multimodal` | transformers | multilingual | Audio LLM, wired up but unverified |
+| `qwen3-asr-1.7b` | transformers | multilingual | **Blocked:** no transformers release both knows and correctly loads this checkpoint |
+
+Two entries are wired up but cannot currently produce a number, and are listed
+as blocked rather than quietly dropped:
+
+- **`voxtral-mini-3b`** hangs on Apple Silicon. `generate()` never returns; a
+  single 5-second chunk still hangs after 300 s, while the same weights load in
+  30 s, so this is a deadlock and not slowness. Sampling the process shows a
+  Metal command buffer that never completes. Forcing
+  `attn_implementation="eager"` — the usual remedy for SDPA on MPS — does not
+  help. Re-test against a newer torch MPS backend.
+- **`qwen3-asr-1.7b`** loads with 708 missing and 708 unexpected keys: the whole
+  audio tower is randomly initialised, so transformers 5.15.1's implementation
+  does not match the published checkpoint. The model does not exist at all in
+  4.57.x, so no available version both knows it and loads it.
+
+Neither is run on CPU as a workaround. A model that will not run on the GPU is
+recorded as a failure, because a CPU number would not be comparable to any other
+row in the table.
 
 Diarisation:
 
@@ -77,7 +96,7 @@ cp .env.example .env
 
 ## 1. Write a conversation
 
-A script is a YAML file listing speakers and turns. See [`conversations/standup-de.yaml`](conversations/standup-de.yaml) (German, 3 speakers), [`conversations/support-call-en.yaml`](conversations/support-call-en.yaml) (English, 2 speakers) and [`conversations/crosstalk-de.yaml`](conversations/crosstalk-de.yaml) (German, 4 speakers, 9.3 % overlapping speech).
+A script is a YAML file listing speakers and turns. See [`conversations/standup-de.yaml`](conversations/standup-de.yaml) (German, 3 speakers), [`conversations/support-call-en.yaml`](conversations/support-call-en.yaml) (English, 2 speakers), [`conversations/crosstalk-de.yaml`](conversations/crosstalk-de.yaml) (German, 4 speakers, 9.3 % overlapping speech) and [`conversations/crosstalk-en.yaml`](conversations/crosstalk-en.yaml) (English, 4 speakers, ~8.5 % overlap).
 
 ```yaml
 name: standup-de
@@ -102,7 +121,9 @@ Voices are auto-assigned per language and guaranteed distinct — two speakers s
 
 Write scripts that stress what you care about: loanwords, numbers, proper nouns, spelled-out email addresses, cross-talk. Those are where models actually differ.
 
-Overlap deserves its own script rather than a sprinkling of negative gaps. `standup-de` has 0.55 s of overlap in 85 s of speech — 0.6 %, effectively none, where real meetings run 5–20 %. `crosstalk-de` is built for it: interruptions mid-sentence, two people answering at once, back-channels, and four speakers to sit right on Sortformer's limit.
+Overlap deserves its own script rather than a sprinkling of negative gaps. `standup-de` has 0.55 s of overlap in 85 s of speech — 0.6 %, effectively none, where real meetings run 5–20 %. `crosstalk-de` and `crosstalk-en` are built for it: interruptions mid-sentence, two people answering at once, back-channels, and four speakers to sit right on Sortformer's limit. They land at 9.3 % and ~8.5 % overlap. The English one exists because Kokoro has no German voices, so `crosstalk-de` alone cannot answer whether an overlap result is a property of the audio or of the engine; and it is an independent conversation rather than a translation, so the two are two samples instead of one measured twice.
+
+A turn that begins while the previous speaker is still talking is synthesised 3 dB louder. People raise their voice to be heard over someone else, and an interruption rendered at ordinary conversational level is easier to pull apart than the real thing — which would flatter every diarisation backend on precisely the input meant to be hard.
 
 ## 2. Synthesise sessions
 

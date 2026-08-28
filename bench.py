@@ -524,6 +524,31 @@ MODEL_REGISTRY: dict[str, dict] = {
         "languages": {"en"},
         "chunk_seconds": 30.0,
     },
+    # Needs a newer transformers than NeMo's `~=4.57` pin allows, so it
+    # runs in its own environment. Create it with:
+    #   uv venv .venv-qwen3 && \
+    #   UV_INDEX_URL=$PROXY VIRTUAL_ENV=.venv-qwen3 uv pip install \
+    #     transformers torch soundfile librosa numpy
+    #
+    # BLOCKED upstream, and the entry is kept so the finding is not lost.
+    # transformers 5.15.1 — the only version carrying `qwen3_asr`, since
+    # nothing between 4.57 and 5.x exists on the feed — cannot load this
+    # checkpoint: 708 missing and 708 unexpected keys, i.e. the whole
+    # audio tower is randomly initialised (`model.audio_tower.conv2d1.
+    # weight` and every sibling). Its `apply_transcription_request` also
+    # raises on the shipped chat template for every language including
+    # None. Two independent signs the implementation and the checkpoint
+    # disagree. Re-check when either a 4.58–4.9x release appears on the
+    # feed or a newer transformers fixes the weight mapping.
+    "qwen3-asr-1.7b": {
+        "kind": "hf",
+        "hf_id": "Qwen/Qwen3-ASR-1.7B",
+        "hf_family": "audio-llm",
+        "label": "Qwen3-ASR 1.7B (2025, separate venv — blocked, see comment)",
+        "languages": {"en", "de"},
+        "chunk_seconds": 30.0,
+        "interpreter": ".venv-qwen3",
+    },
     "granite-speech-4.1": {
         "kind": "hf",
         "hf_id": "ibm-granite/granite-speech-4.1-2b",
@@ -540,11 +565,18 @@ MODEL_REGISTRY: dict[str, dict] = {
         "languages": None,
         "chunk_seconds": 30.0,
     },
+    # Blocked on MPS: generate() never returns. Confirmed a deadlock rather than
+    # slowness -- a single 5-second chunk still hangs after 300s, while the same
+    # weights load in 30s. Sampling the process shows a Metal command buffer that
+    # never completes. Switching to attn_implementation="eager" (the usual fix for
+    # SDPA on MPS) did not help. Not run on CPU: this benchmark records a model as
+    # failed rather than reporting a number the hardware would never produce.
+    # Re-test when torch ships a newer MPS backend.
     "voxtral-mini-3b": {
         "kind": "hf",
         "hf_id": "mistralai/Voxtral-Mini-3B-2507",
         "hf_family": "voxtral",
-        "label": "Mistral Voxtral Mini 3B (2025)",
+        "label": "Mistral Voxtral Mini 3B (2025) [blocked: hangs on MPS]",
         "languages": None,
         "chunk_seconds": 30.0,
     },
@@ -766,6 +798,40 @@ def write_cell(run: "ModelRun", run_dir: Path) -> None:
     )
 
 
+def _resolve_interpreter(spec: str) -> Path:
+    """Resolve a registry `interpreter` to a Python executable.
+
+    Accepts either a path to the interpreter itself or a venv root, so a
+    registry entry can say `.venv-qwen3` and not repeat `/bin/python`.
+
+    A relative spec is tried against the script's directory and against
+    the directory holding the currently active virtualenv. The second is
+    what makes this work from a git worktree, where the code sits in
+    `.worktrees/<branch>/` but the environments live beside the main
+    checkout — a sibling venv is next to the active one, not next to the
+    script.
+    """
+    raw = Path(spec).expanduser()
+    if raw.is_absolute():
+        candidates = [raw]
+    else:
+        roots = [Path(__file__).resolve().parent, Path(sys.prefix).resolve().parent]
+        candidates = [root / raw for root in dict.fromkeys(roots)]
+
+    tried: list[Path] = []
+    for candidate in candidates:
+        exe = candidate / "bin" / "python" if candidate.is_dir() else candidate
+        if exe.exists():
+            return exe
+        tried.append(exe)
+
+    locations = "\n  ".join(str(t) for t in tried)
+    raise FileNotFoundError(
+        f"interpreter {spec!r} not found. Tried:\n  {locations}\n"
+        "Create the environment first (see the model's registry comment)."
+    )
+
+
 def bench_cell_subprocess(
     session: "Session",
     model_key: str,
@@ -783,8 +849,17 @@ def bench_cell_subprocess(
     _, metrics_path = cell_paths(run_dir, model_key, channel)
     metrics_path.unlink(missing_ok=True)
 
+    # A model whose dependencies conflict with the default environment
+    # declares its own interpreter in the registry. NeMo pins
+    # transformers~=4.57, so a model needing a newer one cannot share this
+    # venv without breaking every NVIDIA model in the matrix. Running one
+    # cell per subprocess already isolates each model, so this is only a
+    # question of which Python starts.
+    interpreter = MODEL_REGISTRY.get(model_key, {}).get("interpreter")
+    executable = str(_resolve_interpreter(interpreter)) if interpreter else sys.executable
+
     cmd = [
-        sys.executable, str(Path(__file__).resolve()),
+        executable, str(Path(__file__).resolve()),
         "--session", str(session.path),
         "--worker", model_key, channel,
         "--language", language,

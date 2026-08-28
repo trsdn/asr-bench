@@ -170,6 +170,44 @@ def _is_granite(processor) -> bool:
     return type(processor).__name__.startswith("GraniteSpeech")
 
 
+def _audio_pad_multiple(processor) -> int | None:
+    """Samples the audio length must be a multiple of, or None.
+
+    Qwen3-ASR's encoder consumes mel frames in fixed windows and rejects
+    anything that does not divide evenly — the feature extractor pads to
+    the longest item in the batch, which for a single chunk is its own
+    unpadded length, so the caller has to supply the alignment. The
+    window size is read off the model rather than hard-coded, because it
+    is a config value and a future checkpoint may change it.
+    """
+    fe = getattr(processor, "feature_extractor", None)
+    if fe is None or "qwen3asr" not in type(processor).__name__.lower():
+        return None
+    n_window = getattr(fe, "n_window", 50)
+    hop = getattr(fe, "hop_length", 160)
+    return int(n_window) * 2 * int(hop)
+
+
+def _pad_to_multiple(audio: np.ndarray, multiple: int | None) -> np.ndarray:
+    if not multiple or audio.size % multiple == 0:
+        return audio
+    pad = multiple - (audio.size % multiple)
+    return np.concatenate([audio, np.zeros(pad, dtype=audio.dtype)])
+
+
+def _template_owner(processor, tokenizer):
+    """Return whichever object actually carries the chat template.
+
+    Multimodal models increasingly ship the template on the processor
+    rather than the tokenizer, because it has to describe audio and image
+    placeholders the tokenizer knows nothing about. Qwen3-ASR has it on
+    the processor only, and the tokenizer's `apply_chat_template` raises
+    instead of falling back — so asking the wrong object is a hard error,
+    not a silent degradation.
+    """
+    return processor if getattr(processor, "chat_template", None) else tokenizer
+
+
 def _audio_llm_prompt(processor, tokenizer) -> str:
     """Granite's chat template expects a literal `<|audio|>` marker inside
     a plain string; Qwen2-Audio expects the structured content list. Both
@@ -188,7 +226,7 @@ def _audio_llm_prompt(processor, tokenizer) -> str:
                 ],
             }
         ]
-    return tokenizer.apply_chat_template(
+    return _template_owner(processor, tokenizer).apply_chat_template(
         conversation, tokenize=False, add_generation_prompt=True
     )
 
@@ -234,13 +272,38 @@ def run_audio_llm(
     sample_rate = _expected_sample_rate(processor)
 
     tokenizer = getattr(processor, "tokenizer", processor)
-    prompt = _audio_llm_prompt(processor, tokenizer)
+    # A processor carrying `apply_transcription_request` is an ASR-native
+    # multimodal processor: it expands the audio placeholder into a token
+    # count derived from the waveform, so the template has to see the
+    # audio and the prompt cannot be built once up front.
+    #
+    # The method itself is not used. On transformers 5.15.1 it raises
+    # `continue_final_message is set but the final message does not
+    # appear in the chat` for every language including None — the shipped
+    # template and the newer template validation disagree. Building the
+    # same messages by hand goes through the working path. Its presence
+    # is still the honest capability marker for this family.
+    audio_in_template = hasattr(processor, "apply_transcription_request")
+    prompt = None if audio_in_template else _audio_llm_prompt(processor, tokenizer)
+    pad_multiple = _audio_pad_multiple(processor)
 
     texts: list[str] = []
     for chunk in chunks:
-        inputs = _audio_llm_inputs(
-            processor, prompt, _resample(chunk, sample_rate), sample_rate
-        )
+        audio = _pad_to_multiple(_resample(chunk, sample_rate), pad_multiple)
+        if audio_in_template:
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": audio},
+                    {"type": "text", "text": TRANSCRIBE_PROMPT},
+                ],
+            }]
+            text = processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            inputs = processor(text=text, audio=audio)
+        else:
+            inputs = _audio_llm_inputs(processor, prompt, audio, sample_rate)
         inputs = {
             k: (v.to(device) if hasattr(v, "to") else v)
             for k, v in inputs.items()
