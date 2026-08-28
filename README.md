@@ -213,39 +213,59 @@ Voices are assigned one per speaker and never reused — a shared voice would ma
 diarisation meaningless. A speaker's optional `gender:` picks a plausible voice
 where one is free; it has no effect on scoring.
 
-**This is not a small effect.** Same script, same profile, mixed channel:
+**This is not a small effect.** Same script, same profile, mixed channel, all 13
+models that produce a transcript. WER, best per row in bold:
 
 | Model | `say` | `piper` | `kokoro` | Spread |
-|---|---|---|---|---|
-| `parakeet-tdt-v2` | **9.3 %** | **11.4 %** | **9.3 %** | 2.1 |
-| `whisper-large-v3-turbo` | 11.8 % | 13.9 % | 9.7 % | 4.2 |
-| `moonshine-base` | 11.4 % | 16.5 % | 10.1 % | 6.4 |
+|---|---:|---:|---:|---:|
+| `canary` | 5.9 | 6.8 | **3.4** | 3.4 |
+| `canary-180m-flash` | 6.3 | **5.1** | **5.1** | 1.3 |
+| `kyutai-stt-2.6b` | **2.1** | 5.1 | 9.7 | **7.6** |
+| `parakeet-ctc-1.1b` | 5.9 | 7.6 | **3.4** | 4.2 |
+| `granite-speech-4.1` | 9.7 | 10.5 | 7.6 | 3.0 |
+| `parakeet-tdt-v2` | 9.3 | 11.4 | 9.3 | 2.1 |
+| `canary-qwen-2.5b` | 9.7 | 11.0 | 9.7 | 1.3 |
+| `parakeet-tdt-v3` | 11.4 | 12.2 | 9.7 | 2.5 |
+| `whisper-large-v3-turbo` | 11.8 | 10.5 | 11.0 | 1.3 |
+| `distil-whisper-large-v3` | 10.1 | 13.9 | 9.7 | 4.2 |
+| `whisper-large-v3` | 10.1 | 14.3 | 10.1 | 4.2 |
+| `moonshine-base` | 11.4 | 15.6 | 10.1 | 5.5 |
+| `canary-1b-v2` | 15.2 | 13.1 | 11.8 | 3.4 |
 
-The engine moves absolute WER by up to 6.4 points, and it does not move every
-model by the same amount: switching from `say` to `piper` costs Parakeet 2.1
-points and Moonshine 5.1. So an absolute WER quoted without its engine is not a
-meaningful number, and a small gap between two models on one engine is well
-inside the range the engine alone can produce.
+**The engine decides which model wins.** `say` → `kyutai-stt-2.6b` at 2.1 %,
+`piper` → `canary-180m-flash`, `kokoro` → `canary`. Rank correlation between
+engines is positive but well short of agreement: Spearman ρ = +0.74 (say/piper),
++0.76 (say/kokoro), +0.65 (piper/kokoro). The broad shape of the ranking
+survives; individual models move up to 7 places out of 13.
 
-The ranking, however, is stable here — Parakeet wins on all three. An earlier
-version of this table showed the ranking *inverting* between `say` and `piper`,
-and that was wrong: it was an artefact of a bug where a speaker's `rate:` was
-only honoured by `say`, so the `piper` and `kokoro` sessions were not just
-differently voiced but differently paced. With tempo applied on all three
-engines the inversion disappears. It is left recorded here rather than quietly
-deleted, because it is a good illustration of the failure mode this axis exists
-to catch: a confident cross-engine conclusion that was really measuring an
-uncontrolled variable.
+`kyutai-stt-2.6b` is the clearest case. It is first on `say` by a wide margin
+and eighth on `kokoro`. On a 237-word reference that is 5 word errors against
+23 — an 18-word difference, far too large to be sampling noise, and the model
+that looks like the obvious winner of this benchmark on one engine looks
+mid-table on another. It is the only model here trained at 24 kHz rather than
+16, which is a plausible but untested explanation.
+
+**Read small gaps with suspicion.** The reference is 237 words, so one word is
+0.42 points of WER. Differences below about one point are two or three words and
+should not be ranked at all; most of the mid-table ordering above is inside that
+band. What is outside it is the spread column.
+
+An earlier version of this table used 3 models and showed the ranking *inverting*
+between `say` and `piper`. That specific claim was wrong — an artefact of a bug
+where a speaker's `rate:` was honoured only by `say`, so the `piper` and `kokoro`
+sessions were not merely differently voiced but differently paced. It is left
+recorded here rather than quietly deleted, because the correction cuts both ways:
+with the bug fixed and 13 models instead of 3, a weaker version of the original
+claim does hold. The engine does not reverse the ranking wholesale, but it does
+change the winner, which is enough to invalidate a single-engine conclusion.
 
 The honest rule is the weaker one: compare models within an engine, and treat a
 result that only holds on one engine as a property of that engine until it is
 shown on another.
 
-The axis is not specific to transcription. `sortformer-streaming` scores 1.5 %
-DER on `standup-de__say__clean` and 4.0 % on the same script under `piper` —
-the diarisation task got harder because the voices changed, not because the
-recording did. (That measurement predates the `rate` fix and should be
-re-checked; see the open issues.)
+The axis is not specific to transcription. Diarisation shows the same thing more
+violently — `sortformer` scores 36.6 % DER on `standup-de__say__clean` and 1.0 %
+on the same script under `piper`. See the diarisation results below.
 
 A speaker's `rate:` is written in words per minute, the unit macOS `say` uses,
 and is converted to each engine's own control — Piper's `length_scale`, Kokoro's
@@ -386,7 +406,43 @@ Measured on an Apple Silicon laptop, `mixed` channel, `clean` profile, one subpr
 > snapshot, not as current numbers — and given the cross-engine spread documented
 > under "TTS backends", do not read an absolute WER without its engine.**
 
-**German** — `standup-de`, 94 s, 3 speakers, 226 reference words:
+**English** — `support-call-en__say__clean`, 80 s, 2 speakers, 237 reference words,
+all 13 models that produce a transcript:
+
+| Model | Wall clock | RTF | Peak RSS | WER | CER |
+|---|---:|---:|---:|---:|---:|
+| kyutai-stt-2.6b | 203 s | 2.54 | 7.8 GB | **2.1 %** | 0.7 % |
+| canary | 34 s | 0.42 | 6.7 GB | 5.9 % | 2.2 % |
+| parakeet-ctc-1.1b | 21 s | 0.26 | 8.3 GB | 5.9 % | 2.4 % |
+| canary-180m-flash | 15 s | 0.19 | 2.0 GB | 6.3 % | 2.5 % |
+| parakeet-tdt-v2 | 14 s | 0.17 | 5.3 GB | 9.3 % | 7.9 % |
+| canary-qwen-2.5b | 74 s | 0.93 | 10.4 GB | 9.7 % | 8.0 % |
+| granite-speech-4.1 | 42 s | 0.53 | 9.0 GB | 9.7 % | 8.1 % |
+| whisper-large-v3 | 150 s | 1.87 | 3.6 GB | 10.1 % | 8.3 % |
+| distil-whisper-large-v3 | 26 s | 0.33 | 2.3 GB | 10.1 % | 8.2 % |
+| parakeet-tdt-v3 | 18 s | 0.22 | 5.4 GB | 11.4 % | 9.0 % |
+| moonshine-base | 17 s | 0.21 | 0.8 GB | 11.4 % | 8.8 % |
+| whisper-large-v3-turbo | 42 s | 0.52 | 2.4 GB | 11.8 % | 10.3 % |
+| canary-1b-v2 | 46 s | 0.57 | 8.0 GB | 15.2 % | 10.0 % |
+
+Read the ordering with the sample size in mind: 237 words means one word is 0.42
+points, so the block from 9.3 % to 11.8 % is a handful of words wide and is not a
+ranking. The separations that survive are the top group, the bottom, and the
+per-engine differences in the table further up.
+
+`kyutai-stt-2.6b` wins this column by a distance, at RTF 2.54 — the only model
+here slower than realtime by more than a little, and the only one whose win does
+not survive a change of TTS engine.
+
+Two rows are worth reading together. `parakeet-ctc-1.1b` and `parakeet-tdt-v2`
+share an encoder and differ in the decoder head; CTC scores 5.9 % against the
+transducer's 9.3 % here, and does it in less wall clock. The CER column shows the
+same split more sharply — 2.4 % against 7.9 %. A CER that high next to that WER
+means the errors are not scattered word substitutions but systematic formatting
+differences, most of them in how numbers and identifiers get written out.
+
+**German** — `standup-de`, 94 s, 3 speakers, 226 reference words. These figures
+predate the rate fix and are stale; the German re-measure is issue #7.
 
 | Model | Wall clock | RTF | Peak RSS | WER | CER |
 |---|---:|---:|---:|---:|---:|
@@ -396,19 +452,6 @@ Measured on an Apple Silicon laptop, `mixed` channel, `clean` profile, one subpr
 | canary-1b-v2 | 42 s | 0.45 | 9.4 GB | 10.2 % | 4.2 % |
 | canary | 34 s | 0.37 | 7.1 GB | 20.3 % | 17.0 % |
 | canary-180m-flash | 19 s | 0.20 | 2.6 GB | 23.4 % | 20.7 % |
-
-**English** — `support-call-en`, 80 s, 2 speakers, 237 reference words:
-
-| Model | Wall clock | RTF | Peak RSS | WER | CER |
-|---|---:|---:|---:|---:|---:|
-| canary | 26 s | 0.32 | 7.1 GB | **5.9 %** | 2.2 % |
-| canary-180m-flash | 17 s | 0.22 | 2.4 GB | 6.3 % | 2.5 % |
-| parakeet-tdt-v2 | 14 s | 0.17 | 5.4 GB | 8.0 % | 7.1 % |
-| whisper-large-v3-turbo | 40 s | 0.50 | 2.5 GB | 8.0 % | 6.8 % |
-| distil-whisper-large-v3 | 28 s | 0.35 | 2.3 GB | 8.4 % | 7.0 % |
-| parakeet-tdt-v3 | 18 s | 0.23 | 5.6 GB | 9.7 % | 7.8 % |
-| canary-1b-v2 | 44 s | 0.54 | 8.5 GB | 13.5 % | 8.8 % |
-| whisper-large-v3 | 273 s | 3.42 | 6.2 GB | 43.9 % | 39.4 % |
 
 Diarisation, same sessions plus a deliberately overlap-heavy one:
 
