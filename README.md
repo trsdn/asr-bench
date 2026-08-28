@@ -56,6 +56,34 @@ Neither is run on CPU as a workaround. A model that will not run on the GPU is
 recorded as a failure, because a CPU number would not be comparable to any other
 row in the table.
 
+Blocked models are excluded from the default `--models` set. They stay in the
+registry so the reason stays recorded, but naming one explicitly is the only way
+to spend time on it.
+
+### Time budget: slowness is a result, not a missing number
+
+Every model here that has ever produced a transcript runs between RTF 0.14 and
+1.6, worst case 3.4. The ones that fail sit above 10. There is nothing in
+between, which makes the gap easy to exploit: each cell gets
+`--timeout-floor` (180 s, for weight loading, which does not scale with the
+audio) plus `--timeout-rtf` × the audio duration (5×). That is a little over
+twice the slowest cell that has ever succeeded, so it abandons only models that
+were never going to be usable locally.
+
+Two details matter more than the numbers:
+
+- **The budget is relative to the audio.** A flat timeout is wrong in both
+  directions — too generous on a 30-second clip, too tight on a ten-minute one.
+- **One timeout characterises a model.** The channels of a session are the same
+  conversation seen three ways, so a model that cannot finish the mixed track
+  will not finish the isolated ones. The remaining channels are skipped rather
+  than re-confirming the same failure at full price. This is what turned a
+  single dead model into 45 minutes of held machine before it was fixed.
+
+This follows from what the benchmark is for. The question is whether a model is
+usable for local transcription on a laptop, and at RTF > 1 the answer is already
+no. Exceeding the budget is therefore a finding, not a gap in the table.
+
 Diarisation:
 
 | Backend | Runtime | Notes |

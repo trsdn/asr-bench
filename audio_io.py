@@ -162,3 +162,25 @@ def ffmpeg_codec_roundtrip(
             return audio
         decoded, _ = ffmpeg_decode(encoded, sr)
         return audio if decoded is None else decoded
+
+
+def audio_duration(path: Path, target_sr: int = TARGET_SR) -> float:
+    """Duration in seconds.
+
+    Tries the WAV header first: sessions are 16 kHz PCM WAV, and reading
+    44 bytes to size a timeout is better than decoding a minute of audio
+    to do it. Falls back to a full decode for anything else, and to 0.0
+    if even that fails -- a duration probe must not be the thing that
+    breaks a run.
+    """
+    import wave
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        with wave.open(str(path), "rb") as w:
+            frames, rate = w.getnframes(), w.getframerate()
+            if rate:
+                return frames / rate
+    with contextlib.suppress(Exception):
+        return len(load_mono_16k(path, target_sr)) / target_sr
+    return 0.0

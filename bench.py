@@ -56,7 +56,7 @@ import soundfile as sf  # noqa: E402
 from rich.console import Console  # noqa: E402
 from rich.table import Table  # noqa: E402
 
-from audio_io import TARGET_SR, load_mono_16k  # noqa: E402
+from audio_io import TARGET_SR, audio_duration, load_mono_16k  # noqa: E402
 from score import score as score_transcript  # noqa: E402
 
 # Silence padded around every NeMo window. Attention decoders are prone
@@ -68,7 +68,24 @@ NEMO_MAX_RETRY_DEPTH = 3
 # Wall clock per cell. Generous enough for a 7B audio LLM chewing through
 # a two-minute session on the GPU, short enough that a model deadlocked
 # in a Metal command buffer does not hold the machine indefinitely.
-DEFAULT_CELL_TIMEOUT = 900.0
+# A cell's time budget is relative to the audio, not a flat wall-clock
+# number. Every model that has ever produced a transcript here runs at
+# RTF 0.14-1.6; the ones that fail sit above 10. There is no model in
+# between, so a generous multiple of realtime separates "slow" from
+# "never going to finish" without waiting to find out.
+#
+# A flat 900 s was the wrong instrument twice over: it let one dead model
+# burn 45 minutes across three channels, and it would have scaled with
+# session length into hours. The point of this benchmark is local
+# transcription on a laptop, where RTF > 1 already means unusable -- so a
+# model that exceeds the budget has not failed to produce a datum, it has
+# produced one.
+DEFAULT_TIMEOUT_RTF = 5.0
+# Weight loading and warm-up are fixed costs that do not scale with the
+# audio, and a 7B model can spend two minutes on them before decoding a
+# single token. Charged on top of the RTF budget so short sessions do not
+# fail models for being large.
+DEFAULT_TIMEOUT_FLOOR = 180.0
 
 console = Console()
 
@@ -544,6 +561,7 @@ MODEL_REGISTRY: dict[str, dict] = {
     # disagree. Re-check when either a 4.58–4.9x release appears on the
     # feed or a newer transformers fixes the weight mapping.
     "qwen3-asr-1.7b": {
+        "blocked": True,
         "kind": "hf",
         "hf_id": "Qwen/Qwen3-ASR-1.7B",
         "hf_family": "audio-llm",
@@ -561,6 +579,7 @@ MODEL_REGISTRY: dict[str, dict] = {
         "chunk_seconds": 30.0,
     },
     "qwen2-audio-7b": {
+        "blocked": True,
         "kind": "hf",
         "hf_id": "Qwen/Qwen2-Audio-7B-Instruct",
         "hf_family": "audio-llm",
@@ -589,6 +608,7 @@ MODEL_REGISTRY: dict[str, dict] = {
     # failed rather than reporting a number the hardware would never produce.
     # Re-test when torch ships a newer MPS backend.
     "voxtral-mini-3b": {
+        "blocked": True,
         "kind": "hf",
         "hf_id": "mistralai/Voxtral-Mini-3B-2507",
         "hf_family": "voxtral",
@@ -953,10 +973,13 @@ def main() -> int:
     ap.add_argument(
         "--models",
         nargs="+",
-        default=list(MODEL_REGISTRY),
+        default=[k for k, c in MODEL_REGISTRY.items() if not c.get("blocked")],
         choices=list(MODEL_REGISTRY.keys()),
-        help="Which models to run. Default: all of them. Models that "
-             "don't support the session language are skipped.",
+        help="Which models to run. Default: every model not marked "
+             "blocked. Models that don't support the session language are "
+             "skipped. Blocked models stay in the registry so the reason "
+             "is recorded, but naming one explicitly is the only way to "
+             "spend time on it.",
     )
     ap.add_argument(
         "--ignore-language-support",
@@ -991,13 +1014,29 @@ def main() -> int:
              "meaningless from the second model onwards (see --worker).",
     )
     ap.add_argument(
+        "--timeout-rtf",
+        type=float,
+        default=DEFAULT_TIMEOUT_RTF,
+        help="Time budget per cell as a multiple of the audio duration "
+             f"(default: {DEFAULT_TIMEOUT_RTF:.0f}x), plus "
+             f"--timeout-floor for load time. Working models run at "
+             "RTF 0.14-1.6, so this abandons only models that were never "
+             "going to be usable locally. 0 disables the limit.",
+    )
+    ap.add_argument(
+        "--timeout-floor",
+        type=float,
+        default=DEFAULT_TIMEOUT_FLOOR,
+        help="Seconds added to every cell's budget for weight loading and "
+             f"warm-up (default: {DEFAULT_TIMEOUT_FLOOR:.0f}), which are "
+             "fixed costs that do not scale with the audio.",
+    )
+    ap.add_argument(
         "--timeout",
         type=float,
-        default=DEFAULT_CELL_TIMEOUT,
-        help="Seconds before a model is abandoned and recorded as timed "
-             f"out (default: {DEFAULT_CELL_TIMEOUT:.0f}). 0 disables the "
-             "limit. Guards against models that deadlock on MPS instead "
-             "of failing.",
+        default=None,
+        help="Absolute per-cell timeout in seconds, overriding the "
+             "audio-relative budget. 0 disables the limit.",
     )
     ap.add_argument(
         "--worker",
@@ -1056,20 +1095,43 @@ def main() -> int:
     # is negligible next to model start-up.
     results: list[ModelRun] = []
 
+    def cell_budget(channel: str) -> float | None:
+        """Seconds a cell may take before it is abandoned."""
+        if args.timeout is not None:
+            return args.timeout or None
+        if not args.timeout_rtf:
+            return None
+        seconds = audio_duration(session.channels[channel])
+        return args.timeout_floor + args.timeout_rtf * seconds
+
     for model_key in models:
+        # One timeout is enough to characterise a model. The channels of a
+        # session are the same audio seen three ways, so a model that cannot
+        # finish the mixed track will not finish the isolated ones either --
+        # running them anyway triples the cost of learning nothing new. This
+        # is what turned one dead model into 45 minutes of held machine.
+        timed_out = False
         for ch in selected:
+            if timed_out:
+                console.print(
+                    f"[yellow]skip {model_key} / {ch}: "
+                    f"already over budget on an earlier channel[/yellow]"
+                )
+                continue
             console.print(f"\n[bold magenta]▶ {model_key} / {ch}[/bold magenta]")
             if args.in_process:
                 run = bench_cell(session, model_key, ch, language, run_dir)
             else:
                 run = bench_cell_subprocess(
                     session, model_key, ch, language, run_dir,
-                    timeout_seconds=args.timeout or None,
+                    timeout_seconds=cell_budget(ch),
                 )
             results.append(run)
 
             if run.error:
                 console.print(f"[red]  {run.error}[/red]")
+                if "timed out" in run.error:
+                    timed_out = True
             else:
                 acc = run.accuracy
                 wer_note = f" · WER {acc['wer']:.1%}" if acc else ""
