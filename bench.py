@@ -626,6 +626,14 @@ MODEL_REGISTRY: dict[str, dict] = {
         # Same reasoning as qwen2-audio-7b: 5.6B params does not fit in
         # float32 alongside a KV cache.
         "dtype": "float16",
+        # The remote code imports torchvision at module scope even for the
+        # audio path, so torchvision is a hard dependency of this row. It is
+        # pinned to 0.24.1, the build that pairs with torch 2.9.1 — the
+        # unpinned install drags torch to 2.13 and breaks NeMo.
+        #
+        # Loads and generates after all that, then exceeds the time budget
+        # like every other decoder-only audio LLM tried on MPS.
+        "blocked": True,
     },
     "whisper-large-v3": {
         "kind": "whisper",

@@ -45,6 +45,27 @@ def _torch():
     return torch
 
 
+def _drop_remote_import(package: str) -> None:
+    """Stop `trust_remote_code` from demanding a package it never uses.
+
+    Transformers scans a remote modeling file for imports and refuses to
+    load if one is missing. The scan only understands `try/except
+    ImportError` as "optional", so an import guarded by a runtime `if`
+    still counts as required. Phi-4-multimodal imports flash_attn under
+    `if is_flash_attn_2_available()`, which is False on Metal — the
+    branch never runs, but the check fails anyway, and flash_attn has no
+    Metal build to install. Filtering the name out of the scan is the
+    difference between running the model and not having the row."""
+    from transformers import dynamic_module_utils
+
+    original = dynamic_module_utils.get_imports
+
+    def patched(filename):
+        return [i for i in original(filename) if i != package]
+
+    dynamic_module_utils.get_imports = patched
+
+
 def _device_and_dtype(override: str | None = None, dtype: str | None = None):
     """Apple Silicon: MPS, float32 by default.
 
@@ -403,12 +424,21 @@ def run_phi4_multimodal(
     torch = _torch()
     from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
 
+    _drop_remote_import("flash_attn")
     device, dtype = _device_and_dtype(device, dtype)
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, dtype=dtype, trust_remote_code=True, _attn_implementation="eager"
+        model_id,
+        dtype=dtype,
+        trust_remote_code=True,
+        _attn_implementation="eager",
+        # Placed by accelerate during loading rather than moved afterwards.
+        # The remote code reads tensor values while building submodules, and
+        # a deferred `.to(device)` leaves those on meta, where `.item()`
+        # raises instead of returning a number.
+        device_map=device,
     )
-    model.to(device).eval()
+    model.eval()
     generation_config = GenerationConfig.from_pretrained(model_id)
 
     prompt = (

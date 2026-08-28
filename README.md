@@ -33,12 +33,12 @@ Transcription:
 | `kyutai-stt-2.6b` | transformers | English | `kyutai/stt-2.6b-en-trfs`. Streaming architecture; trained at 24 kHz, not 16 |
 | `moonshine-base` | transformers | English | 61M params — the small-and-fast end of the range |
 | `granite-speech-4.1` | transformers | English | IBM's audio LLM (2026) |
-| `voxtral-mini-3b` | transformers | multilingual | Mistral's audio LLM. **Blocked:** deadlocks on MPS (see below) |
-| `qwen2-audio-7b` | transformers | multilingual | Audio LLM, wired up but unverified |
-| `phi-4-multimodal` | transformers | multilingual | Audio LLM, wired up but unverified |
+| `voxtral-mini-3b` | transformers | multilingual | Mistral's audio LLM. **Blocked:** exceeds the time budget on MPS (see below) |
+| `qwen2-audio-7b` | transformers | multilingual | Audio LLM. **Blocked:** exceeds the time budget on MPS |
+| `phi-4-multimodal` | transformers | multilingual | Audio LLM. **Blocked:** exceeds the time budget on MPS |
 | `qwen3-asr-1.7b` | transformers | multilingual | **Blocked:** no transformers release both knows and correctly loads this checkpoint |
 
-Two entries are wired up but cannot currently produce a number, and are listed
+Four entries are wired up but cannot currently produce a number, and are listed
 as blocked rather than quietly dropped:
 
 - **`voxtral-mini-3b`** hangs on Apple Silicon. `generate()` never returns; a
@@ -47,14 +47,34 @@ as blocked rather than quietly dropped:
   Metal command buffer that never completes. Forcing
   `attn_implementation="eager"` — the usual remedy for SDPA on MPS — does not
   help. Re-test against a newer torch MPS backend.
+- **`qwen2-audio-7b`** needs `dtype: float16` to load at all — in float32 its
+  weights alone are 29.5 GiB against Metal's 30.19 GiB watermark, leaving nothing
+  for the KV cache. float16 clears the allocation failure and buys a timeout
+  instead.
+- **`phi-4-multimodal`** now loads and generates, after a chain of dependency
+  work: `torchvision` pinned to 0.24.1 (the unpinned install pulls torch 2.13 and
+  breaks NeMo), plus `peft` and `backoff`, plus filtering `flash_attn` out of the
+  remote-code import scan — it sits behind `if is_flash_attn_2_available()`,
+  which is False here, but the scanner only understands `try/except` as optional
+  and there is no Metal build to satisfy it with. All of that got the model to
+  the same place as the other two: over budget.
 - **`qwen3-asr-1.7b`** loads with 708 missing and 708 unexpected keys: the whole
   audio tower is randomly initialised, so transformers 5.15.1's implementation
   does not match the published checkpoint. The model does not exist at all in
   4.57.x, so no available version both knows it and loads it.
 
-Neither is run on CPU as a workaround. A model that will not run on the GPU is
-recorded as a failure, because a CPU number would not be comparable to any other
-row in the table.
+**Three of the four are the same shape of model.** Every encoder-decoder ASR
+model in the table runs at RTF 0.14–1.6. Every decoder-only audio LLM tried so
+far — Voxtral, Qwen2-Audio, Phi-4 — exceeds a 5× realtime budget on MPS, each
+after a different amount of setup work and for reasons that look identical from
+outside. That is a pattern rather than three accidents, and the honest reading is
+that autoregressive audio LLMs are not currently practical on Apple Silicon,
+whatever their accuracy might be. Treat the next one as blocked until shown
+otherwise rather than budgeting a day for it.
+
+None of them is run on CPU as a workaround. A model that will not run on the GPU
+is recorded as a failure, because a CPU number would not be comparable to any
+other row in the table.
 
 Blocked models are excluded from the default `--models` set. They stay in the
 registry so the reason stays recorded, but naming one explicitly is the only way
