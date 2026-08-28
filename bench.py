@@ -395,6 +395,7 @@ def run_hf_model(
     language: str = "en",
     chunk_seconds: float = 30.0,
     device: str | None = None,
+    dtype: str | None = None,
 ) -> str:
     """Bridge to `hf_runners`. Chunking stays here so every model in the
     matrix sees the same windowing policy."""
@@ -405,7 +406,9 @@ def run_hf_model(
     chunks = [
         np.concatenate([pad, audio[start:end], pad]) for start, end in bounds
     ]
-    texts = run_hf(chunks, model_id, family, language=language, device=device)
+    texts = run_hf(
+        chunks, model_id, family, language=language, device=device, dtype=dtype
+    )
     return " ".join(t for t in texts if t).strip()
 
 
@@ -564,6 +567,19 @@ MODEL_REGISTRY: dict[str, dict] = {
         "label": "Qwen2-Audio 7B Instruct (audio LLM)",
         "languages": None,
         "chunk_seconds": 30.0,
+        # 7B in float32 is ~29 GiB of weights, which leaves nothing for the
+        # KV cache under Metal's 30.19 GiB watermark -- it died allocating
+        # 2.38 GiB after the weights were already resident. float16 halves
+        # that. It makes dtype a variable across the table, so treat this
+        # row's output as worth reading rather than trusting: half precision
+        # on Metal fails as silent garbage, not as an exception.
+        #
+        # float16 does clear the OOM, and the model then hits the 900 s
+        # timeout on every channel of a 90 s session instead. So this is not
+        # yet a working row: it is an OOM traded for a timeout. Whether that
+        # is the same MPS deadlock as voxtral-mini-3b or merely a very slow
+        # decode is not established -- both present identically from outside.
+        "dtype": "float16",
     },
     # Blocked on MPS: generate() never returns. Confirmed a deadlock rather than
     # slowness -- a single 5-second chunk still hangs after 300s, while the same
@@ -587,6 +603,9 @@ MODEL_REGISTRY: dict[str, dict] = {
         "label": "Microsoft Phi-4 Multimodal (audio + text)",
         "languages": None,
         "chunk_seconds": 30.0,
+        # Same reasoning as qwen2-audio-7b: 5.6B params does not fit in
+        # float32 alongside a KV cache.
+        "dtype": "float16",
     },
     "whisper-large-v3": {
         "kind": "whisper",
@@ -664,6 +683,7 @@ def run_model(
                 language=lang,
                 chunk_seconds=cfg.get("chunk_seconds", 30.0),
                 device=cfg.get("device"),
+                dtype=cfg.get("dtype"),
             ), None
         else:
             raise ValueError(f"Unknown kind: {cfg['kind']}")

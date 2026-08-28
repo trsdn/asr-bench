@@ -45,12 +45,21 @@ def _torch():
     return torch
 
 
-def _device_and_dtype(override: str | None = None):
-    """Apple Silicon: MPS, float32.
+def _device_and_dtype(override: str | None = None, dtype: str | None = None):
+    """Apple Silicon: MPS, float32 by default.
 
     float32 because half precision is patchy across these architectures
     on Metal and a wrong dtype shows up as silent garbage output rather
     than an exception.
+
+    `dtype` overrides that per model, and exists because the default is
+    not always affordable: a 7B audio LLM in float32 wants ~29 GiB of
+    weights and dies allocating its KV cache on a 32 GB machine. Halving
+    the weights is the difference between a number and no number at all.
+    It does make dtype a variable across the table, so a model that
+    carries an override says so in the registry, and its output is worth
+    reading rather than trusting -- half-precision failure on Metal is
+    silent garbage, not an exception.
 
     There is deliberately no CPU fallback for a working GPU. A 3B audio
     LLM on CPU is slower than realtime by a wide margin, which makes the
@@ -61,12 +70,13 @@ def _device_and_dtype(override: str | None = None):
     import os
 
     torch = _torch()
+    resolved = getattr(torch, dtype) if dtype else torch.float32
     choice = override or os.environ.get("ASR_BENCH_DEVICE")
     if choice:
-        return choice, torch.float32
+        return choice, resolved
     if torch.backends.mps.is_available():
-        return "mps", torch.float32
-    return "cpu", torch.float32
+        return "mps", resolved
+    return "cpu", resolved
 
 
 def _release(*objects) -> None:
@@ -106,6 +116,7 @@ def run_seq2seq(
     model_id: str,
     language: str = "en",
     device: str | None = None,
+    dtype: str | None = None,
 ) -> list[str]:
     """Plain speech-to-text encoder-decoders: Moonshine, Kyutai STT.
 
@@ -114,7 +125,7 @@ def run_seq2seq(
     torch = _torch()
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
-    device, dtype = _device_and_dtype(device)
+    device, dtype = _device_and_dtype(device, dtype)
     processor = AutoProcessor.from_pretrained(model_id)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, dtype=dtype)
     model.to(device).eval()
@@ -255,6 +266,7 @@ def run_audio_llm(
     model_id: str,
     language: str = "en",
     device: str | None = None,
+    dtype: str | None = None,
 ) -> list[str]:
     """Audio-conditioned LLMs driven by a chat template: Granite Speech,
     Qwen2-Audio.
@@ -265,7 +277,7 @@ def run_audio_llm(
     torch = _torch()
     from transformers import AutoProcessor
 
-    device, dtype = _device_and_dtype(device)
+    device, dtype = _device_and_dtype(device, dtype)
     processor = AutoProcessor.from_pretrained(model_id)
     model = _load_generative_model(model_id, dtype)
     model.to(device).eval()
@@ -326,6 +338,7 @@ def run_voxtral(
     model_id: str,
     language: str = "en",
     device: str | None = None,
+    dtype: str | None = None,
 ) -> list[str]:
     """Voxtral ships a dedicated transcription request builder, which is
     the supported path — the generic chat template puts it in
@@ -339,7 +352,7 @@ def run_voxtral(
     torch = _torch()
     from transformers import AutoProcessor, VoxtralForConditionalGeneration
 
-    device, dtype = _device_and_dtype(device)
+    device, dtype = _device_and_dtype(device, dtype)
     processor = AutoProcessor.from_pretrained(model_id)
     # Voxtral's decoder is a Ministral with sliding-window attention. On
     # MPS the fused SDPA path submits a Metal command buffer that never
@@ -382,6 +395,7 @@ def run_phi4_multimodal(
     model_id: str,
     language: str = "en",
     device: str | None = None,
+    dtype: str | None = None,
 ) -> list[str]:
     """Phi-4-multimodal uses literal `<|audio_1|>` markers in a
     hand-built prompt rather than a chat template, and needs its own
@@ -389,7 +403,7 @@ def run_phi4_multimodal(
     torch = _torch()
     from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
 
-    device, dtype = _device_and_dtype(device)
+    device, dtype = _device_and_dtype(device, dtype)
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id, dtype=dtype, trust_remote_code=True, _attn_implementation="eager"
@@ -436,9 +450,10 @@ def run_hf(
     family: str,
     language: str = "en",
     device: str | None = None,
+    dtype: str | None = None,
 ) -> list[str]:
     try:
         runner = HF_RUNNERS[family]
     except KeyError:
         raise ValueError(f"Unknown HF family: {family}") from None
-    return runner(chunks, model_id, language, device=device)
+    return runner(chunks, model_id, language, device=device, dtype=dtype)
