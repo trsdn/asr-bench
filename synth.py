@@ -50,6 +50,20 @@ REPO_DIR = Path(__file__).resolve().parent
 TTS_CACHE = REPO_DIR / ".tts-cache"
 
 DEFAULT_GAP = 0.35        # seconds of silence between turns
+
+# macOS `say` measures speaking rate in words per minute and defaults to
+# 175 (verified: `-r 175` and no `-r` produce byte-identical durations).
+# A speaker's `rate:` is written in those units. Piper and Kokoro have no
+# notion of wpm, so the script value is converted into each engine's own
+# speed control against this same baseline — otherwise the per-speaker
+# tempo silently applies on one engine out of three, and a cross-engine
+# delta measures tempo as much as synthesiser fingerprint.
+SAY_DEFAULT_WPM = 175
+
+# Bumped when a change alters the waveform a cache key already maps to.
+# Rate support for Piper and Kokoro is exactly that: same key, different
+# audio, so old entries have to be treated as misses rather than served.
+TTS_CACHE_VERSION = 2
 LEAD_IN = 0.5             # silence before the first turn
 TAIL = 0.8                # silence after the last turn
 
@@ -146,7 +160,7 @@ class Speaker:
     id: str
     name: str
     voice: str | None = None
-    rate: int | None = None       # words per minute (`say` only)
+    rate: int | None = None       # words per minute; mapped to each engine's own control
     backend: str | None = None    # override the global TTS backend
     # "f" / "m", optional. Only used to pick a plausible voice from an
     # engine's catalogue; it has no effect on scoring.
@@ -425,7 +439,10 @@ def synth_turn(
     regenerating the same script at three degradation levels costs one TTS
     pass, not three."""
     key_src = json.dumps(
-        {"t": text, "v": voice, "b": backend, "r": rate, "sr": sr, "l": language},
+        {
+            "t": text, "v": voice, "b": backend, "r": rate, "sr": sr,
+            "l": language, "cv": TTS_CACHE_VERSION,
+        },
         sort_keys=True,
     )
     key = hashlib.sha256(key_src.encode("utf-8")).hexdigest()[:20]
@@ -451,20 +468,33 @@ def synth_turn(
             raw = tmpdir / "turn.wav"
             import wave
 
+            from piper import SynthesisConfig
+
             piper_voice = _piper_voice(voice)
+            # `length_scale` stretches the predicted duration, so it is
+            # the inverse of a rate: a faster speaker needs a shorter
+            # utterance. Left at the voice's own default when the script
+            # does not ask for a tempo.
+            syn_config = (
+                SynthesisConfig(length_scale=SAY_DEFAULT_WPM / rate) if rate else None
+            )
             with wave.open(str(raw), "wb") as wav:
-                piper_voice.synthesize_wav(text, wav)
+                piper_voice.synthesize_wav(text, wav, syn_config=syn_config)
         elif backend == "kokoro":
             lang_code = KOKORO_LANG_CODES.get(
                 language.split("-")[0].split("_")[0].lower(), "a"
             )
             pipeline = _kokoro_pipeline(lang_code)
+            # Kokoro's `speed` is a direct multiplier on the reference
+            # tempo, so it maps to the script's wpm the other way round
+            # from Piper's length_scale.
+            speed = rate / SAY_DEFAULT_WPM if rate else 1.0
             # Kokoro splits on its own and yields one result per chunk;
             # a turn is short, but joining is still the correct thing to
             # do rather than taking the first result.
             parts = [
                 r.audio.detach().cpu().numpy()
-                for r in pipeline(text, voice=voice, speed=1.0)
+                for r in pipeline(text, voice=voice, speed=speed)
                 if r.audio is not None
             ]
             if not parts:

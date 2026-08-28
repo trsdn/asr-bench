@@ -4,7 +4,7 @@ Benchmark local open-weight ASR models against each other on **multi-speaker con
 
 The trick: instead of hunting for labelled meeting audio, the harness *synthesises* the conversation from a script. One TTS voice per speaker, laid out on a timeline with realistic pauses and overlaps, then pushed through degradation profiles (telephony codec, room reverb, background noise, clipping). Because we started from the text, every session ships a word-exact reference transcript — so the benchmark reports real **WER/CER**, not just side-by-side transcripts to eyeball.
 
-The catch that comes with the trick: a synthesiser has a fingerprint, and scoring against one engine measures the engine as much as the model. So every script renders through three unrelated TTS lineages (Apple `say`, Piper, Kokoro), and the engine is part of the session identity. It matters more than it sounds — on these sessions the model ranking *inverts* between engines. See [TTS backends](#tts-backends).
+The catch that comes with the trick: a synthesiser has a fingerprint, and scoring against one engine measures the engine as much as the model. So every script renders through three unrelated TTS lineages (Apple `say`, Piper, Kokoro), and the engine is part of the session identity. It matters more than it sounds — the same model on the same script varies by up to 6.4 WER points across engines, and not by the same amount for every model. See [TTS backends](#tts-backends).
 
 ```
 conversations/*.yaml  ──synth.py──▶  sessions/<name>__<profile>/  ──bench.py──▶  runs/<name>/  ──compare.py──▶  comparison.md
@@ -168,20 +168,43 @@ where one is free; it has no effect on scoring.
 
 | Model | `say` | `piper` | `kokoro` | Spread |
 |---|---|---|---|---|
-| `parakeet-tdt-v2` | **9.3 %** | 13.5 % | **9.3 %** | 4.2 |
-| `whisper-large-v3-turbo` | 11.8 % | **11.8 %** | 9.7 % | 2.1 |
-| `moonshine-base` | 11.4 % | 12.7 % | 10.1 % | 2.5 |
+| `parakeet-tdt-v2` | **9.3 %** | **11.4 %** | **9.3 %** | 2.1 |
+| `whisper-large-v3-turbo` | 11.8 % | 13.9 % | 9.7 % | 4.2 |
+| `moonshine-base` | 11.4 % | 16.5 % | 10.1 % | 6.4 |
 
-On `say`, Parakeet is the best of the three and Whisper-Turbo the worst. On
-`piper` that ordering is exactly reversed. A single-engine benchmark would not
-have reported a noisy version of the right answer — it would have reported the
-wrong ranking with a straight face. Compare models within an engine, and treat a
-result that only holds on one engine as a property of that engine.
+The engine moves absolute WER by up to 6.4 points, and it does not move every
+model by the same amount: switching from `say` to `piper` costs Parakeet 2.1
+points and Moonshine 5.1. So an absolute WER quoted without its engine is not a
+meaningful number, and a small gap between two models on one engine is well
+inside the range the engine alone can produce.
+
+The ranking, however, is stable here — Parakeet wins on all three. An earlier
+version of this table showed the ranking *inverting* between `say` and `piper`,
+and that was wrong: it was an artefact of a bug where a speaker's `rate:` was
+only honoured by `say`, so the `piper` and `kokoro` sessions were not just
+differently voiced but differently paced. With tempo applied on all three
+engines the inversion disappears. It is left recorded here rather than quietly
+deleted, because it is a good illustration of the failure mode this axis exists
+to catch: a confident cross-engine conclusion that was really measuring an
+uncontrolled variable.
+
+The honest rule is the weaker one: compare models within an engine, and treat a
+result that only holds on one engine as a property of that engine until it is
+shown on another.
 
 The axis is not specific to transcription. `sortformer-streaming` scores 1.5 %
 DER on `standup-de__say__clean` and 4.0 % on the same script under `piper` —
 the diarisation task got harder because the voices changed, not because the
-recording did.
+recording did. (That measurement predates the `rate` fix and should be
+re-checked; see the open issues.)
+
+A speaker's `rate:` is written in words per minute, the unit macOS `say` uses,
+and is converted to each engine's own control — Piper's `length_scale`, Kokoro's
+`speed` — against `say`'s default of 175 wpm. The engines do not respond
+identically: over a 140→220 wpm range the resulting duration ratio is 1.36 for
+`say`, 1.29 for `piper` and 1.50 for `kokoro`, against 1.57 if tempo scaled
+duration perfectly. Tempo is therefore comparable across engines in direction
+and roughly in magnitude, but not exactly.
 
 Caveat when reading German cross-engine numbers: the German Piper voices are
 unevenly trained (only Thorsten reaches `medium` quality), so a German `say` ↔
@@ -307,11 +330,12 @@ Tested on Apple Silicon. NeMo falls back to CPU for some ops on MPS via `PYTORCH
 
 Measured on an Apple Silicon laptop, `mixed` channel, `clean` profile, one subprocess per model so the memory figures are attributable.
 
-> **These tables are `--tts say` only, and predate two changes: `jiwer`/`num2words`
+> **These tables are `--tts say` only, and predate three changes: `jiwer`/`num2words`
 > are now installed (so `score.py` uses its reference implementations rather than
-> the fallbacks), and the newer models below are not in them. Read them as a
+> the fallbacks), a speaker's `rate:` is now honoured by every TTS engine rather
+> than `say` alone, and the newer models below are not in them. Read them as a
 > snapshot, not as current numbers — and given the cross-engine spread documented
-> under "TTS backends", do not treat a single-engine ranking as the ranking.**
+> under "TTS backends", do not read an absolute WER without its engine.**
 
 **German** — `standup-de`, 94 s, 3 speakers, 226 reference words:
 
