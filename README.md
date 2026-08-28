@@ -238,55 +238,67 @@ models that produce a transcript. WER, best per row in bold:
 
 | Model | `say` | `piper` | `kokoro` | Spread |
 |---|---:|---:|---:|---:|
-| `canary` | 5.9 | 6.8 | **3.4** | 3.4 |
-| `canary-180m-flash` | 6.3 | **5.1** | **5.1** | 1.3 |
-| `kyutai-stt-2.6b` | **2.1** | 5.1 | 9.7 | **7.6** |
-| `parakeet-ctc-1.1b` | 5.9 | 7.6 | **3.4** | 4.2 |
-| `granite-speech-4.1` | 9.7 | 10.5 | 7.6 | 3.0 |
-| `parakeet-tdt-v2` | 9.3 | 11.4 | 9.3 | 2.1 |
-| `canary-qwen-2.5b` | 9.7 | 11.0 | 9.7 | 1.3 |
-| `parakeet-tdt-v3` | 11.4 | 12.2 | 9.7 | 2.5 |
-| `whisper-large-v3-turbo` | 11.8 | 10.5 | 11.0 | 1.3 |
-| `distil-whisper-large-v3` | 10.1 | 13.9 | 9.7 | 4.2 |
-| `whisper-large-v3` | 10.1 | 14.3 | 10.1 | 4.2 |
-| `moonshine-base` | 11.4 | 15.6 | 10.1 | 5.5 |
-| `canary-1b-v2` | 15.2 | 13.1 | 11.8 | 3.4 |
+| `granite-speech-4.1` | 3.4 | 3.8 | **0.9** | 3.0 |
+| `kyutai-stt-2.6b` | **2.1** | 5.1 | 3.4 | 3.0 |
+| `parakeet-tdt-v2` | **3.0** | 5.1 | **3.0** | 2.1 |
+| `canary-qwen-2.5b` | **3.4** | 4.7 | **3.4** | 1.3 |
+| `canary` | 5.1 | 6.0 | **2.5** | 3.4 |
+| `parakeet-tdt-v3` | 5.1 | 6.0 | **3.4** | 2.6 |
+| `parakeet-ctc-1.1b` | 5.1 | 6.8 | **2.5** | 4.3 |
+| `whisper-large-v3-turbo` | 5.5 | **4.3** | 4.7 | 1.3 |
+| `canary-180m-flash` | 5.5 | 5.1 | **4.3** | 1.3 |
+| `distil-whisper-large-v3` | **3.8** | 7.7 | **3.8** | 3.8 |
+| `whisper-large-v3` | **3.8** | 8.1 | **3.8** | 4.3 |
+| `moonshine-base` | 5.1 | 9.8 | **3.8** | 6.0 |
+| `canary-1b-v2` | 8.5 | 6.4 | **6.0** | 2.5 |
 
 **The engine decides which model wins.** `say` → `kyutai-stt-2.6b` at 2.1 %,
-`piper` → `canary-180m-flash`, `kokoro` → `canary`. Rank correlation between
-engines is positive but well short of agreement: Spearman ρ = +0.74 (say/piper),
-+0.76 (say/kokoro), +0.65 (piper/kokoro). The broad shape of the ranking
-survives; individual models move up to 7 places out of 13.
+`piper` → `whisper-large-v3-turbo`, `kokoro` → `granite-speech-4.1` at 0.9 %.
+Rank correlation between engines is weak: Spearman ρ = +0.22 (say/piper), +0.59
+(say/kokoro), +0.23 (piper/kokoro). Only `say` and `kokoro` agree even loosely,
+and no model wins twice.
 
-`kyutai-stt-2.6b` is the clearest case. It is first on `say` by a wide margin
-and eighth on `kokoro`. On a 237-word reference that is 5 word errors against
-23 — an 18-word difference, far too large to be sampling noise, and the model
-that looks like the obvious winner of this benchmark on one engine looks
-mid-table on another. It is the only model here trained at 24 kHz rather than
-16, which is a plausible but untested explanation.
+`piper` is consistently the hardest engine and the one that disagrees with the
+others. Every model scores worse on it, and the models it punishes hardest —
+`moonshine-base` (+4.7 against `say`), `whisper-large-v3` (+4.3) — are not the
+ones the other two engines separate.
 
-**Read small gaps with suspicion.** The reference is 237 words, so one word is
-0.42 points of WER. Differences below about one point are two or three words and
-should not be ranked at all; most of the mid-table ordering above is inside that
-band. What is outside it is the spread column.
+**Read small gaps with suspicion — here that is most of the table.** The
+reference is 237 words, so one word is 0.42 points. The whole 13-model field
+spans 2.1 to 9.8 % across all engines, and within `say` twelve of thirteen models
+fit in 3.4 points — about eight words. Most adjacent pairs are one or two words
+apart, which is not a ranking. The defensible reading is that **on short clean
+English these models are not distinguishable by accuracy**, and the columns worth
+deciding on are RTF and peak RSS. Separating them needs harder or longer
+material.
 
-An earlier version of this table used 3 models and showed the ranking *inverting*
-between `say` and `piper`. That specific claim was wrong — an artefact of a bug
-where a speaker's `rate:` was honoured only by `say`, so the `piper` and `kokoro`
-sessions were not merely differently voiced but differently paced. It is left
-recorded here rather than quietly deleted, because the correction cuts both ways:
-with the bug fixed and 13 models instead of 3, a weaker version of the original
-claim does hold. The engine does not reverse the ranking wholesale, but it does
-change the winner, which is enough to invalidate a single-engine conclusion.
+This table has been wrong twice, in opposite directions, and both corrections are
+recorded rather than deleted because the failure modes are the point of the repo:
+
+1. An early version used 3 models and showed the ranking *inverting* between
+   `say` and `piper`. That was an artefact of a bug where a speaker's `rate:` was
+   honoured only by `say`, so the other engines were not merely differently
+   voiced but differently paced.
+2. The replacement showed a clean 5–6 % / 9–11 % split with ρ ≈ +0.7 and was an
+   artefact of **scoring**, not synthesis. The reference reads a case ID digit by
+   digit; models that emit `4821-773` had it expanded as a cardinal and the
+   spoken "dash" counted as a deletion — together about 6 WER points for
+   formatting choices. Fixing it (see *How scoring works*) moved
+   `parakeet-tdt-v2` from 7th to 3rd, compressed the table, and dropped the rank
+   correlations from +0.65…+0.76 to +0.22…+0.59. **The "the engine broadly
+   preserves the ranking" claim did not survive its own bug fix** — the
+   correlation it rested on was largely the artefact.
 
 The honest rule is the weaker one: compare models within an engine, and treat a
 result that only holds on one engine as a property of that engine until it is
 shown on another.
 
-On German the effect is not weak at all. `whisper-large-v3` is first of six on
-`say` and fifth on `piper`, while both Canary models improve by 7–8 points going
-the other way — a genuine reordering, not just a shift in absolute WER. See the
-German table in the results section.
+On German the effect is much stronger, and it survives the scoring fix (which
+shifted German by a uniform ~0.8 points and changed no ranks).
+`whisper-large-v3` is first of six on `say` and fifth on `piper`, while both
+Canary models improve by 7–9 points going the other way. German is currently the
+only part of this benchmark that separates models at all. See the German table in
+the results section.
 
 The axis is not specific to transcription. Diarisation shows the same thing more
 violently — `sortformer` scores 36.6 % DER on `standup-de__say__clean` and 1.0 %
@@ -378,7 +390,38 @@ Two numbers per row, because scoring is mostly a normalisation problem:
 - **`wer_raw`** — case and punctuation stripped, nothing else.
 - **`wer`** — additionally spells out digits and collapses German/English number-word variants, so a model writing `2.4.1` isn't penalised against a reference saying *"zwei Punkt vier Punkt eins"*.
 
-The gap between them is formatting, not misrecognition. How a spoken digit string *should* be written is genuinely ambiguous (`4821` vs. *"four eight two one"*), which is exactly why both are reported rather than one authoritative score.
+The gap between them is formatting, not misrecognition.
+
+**Digit runs are scored under both readings, and the better one wins.** How a
+spoken number *should* be written is genuinely ambiguous, and the ambiguity has
+two distinct branches: a quantity is read as a cardinal (*"hundertzwanzig"* →
+`120`) while an identifier is read digit by digit (*"four eight two one"* →
+`4821`). A model that emits `4821` has thrown that distinction away; one that
+spells the words out has kept it. Expanding digits only as cardinals therefore
+charges digit-emitting models for a decision the reference made rather than for
+anything they misheard. So `score()` normalises both sides twice — cardinal and
+digit-wise — and keeps whichever gives the lower WER.
+
+**Spoken punctuation next to a number is dropped.** A reference saying *"four
+eight two one, dash, seven seven three"* and a model writing `4821-773` agree,
+but the hyphen is stripped as punctuation while the word *dash* survives, so the
+word becomes a deletion nobody earned. Words like *dash*, *point*, *dot* and
+*Punkt* are removed when they sit next to a number — only then, so an ordinary
+*"that's a good point"* is still scored normally.
+
+Neither rule hides a real error: `1338` against *"one two two seven"* scores 0.6,
+and *"one hundred thirty"* against *"one hundred twenty"* scores 0.25.
+
+This is not cosmetic. Before these fixes the English table showed a clean split
+between a 5–6 % group and a 9–11 % group, and the split was entirely artefact:
+the "good" group happened to spell numbers out like the reference, the "bad"
+group wrote digits. Correcting it moved `parakeet-tdt-v2` from 7th place to 3rd,
+took up to 6 WER points off nine of thirteen models, and collapsed the apparent
+structure of the whole table — including the cross-engine rank correlation that
+had been quoted as evidence the ranking was stable.
+
+`test_score.py` pins all of this down; run it with `python test_score.py`.
+
 
 `score.py` has no third-party dependency — it ships its own Levenshtein alignment and a German/English number speller. If you install [`jiwer`](https://pypi.org/project/jiwer/) and [`num2words`](https://pypi.org/project/num2words/) yourself, it picks them up automatically for the reference implementation and wider language coverage:
 
@@ -437,34 +480,45 @@ all 13 models that produce a transcript:
 | Model | Wall clock | RTF | Peak RSS | WER | CER |
 |---|---:|---:|---:|---:|---:|
 | kyutai-stt-2.6b | 203 s | 2.54 | 7.8 GB | **2.1 %** | 0.7 % |
-| canary | 34 s | 0.42 | 6.7 GB | 5.9 % | 2.2 % |
-| parakeet-ctc-1.1b | 21 s | 0.26 | 8.3 GB | 5.9 % | 2.4 % |
-| canary-180m-flash | 15 s | 0.19 | 2.0 GB | 6.3 % | 2.5 % |
-| parakeet-tdt-v2 | 14 s | 0.17 | 5.3 GB | 9.3 % | 7.9 % |
-| canary-qwen-2.5b | 74 s | 0.93 | 10.4 GB | 9.7 % | 8.0 % |
-| granite-speech-4.1 | 42 s | 0.53 | 9.0 GB | 9.7 % | 8.1 % |
-| whisper-large-v3 | 150 s | 1.87 | 3.6 GB | 10.1 % | 8.3 % |
-| distil-whisper-large-v3 | 26 s | 0.33 | 2.3 GB | 10.1 % | 8.2 % |
-| parakeet-tdt-v3 | 18 s | 0.22 | 5.4 GB | 11.4 % | 9.0 % |
-| moonshine-base | 17 s | 0.21 | 0.8 GB | 11.4 % | 8.8 % |
-| whisper-large-v3-turbo | 42 s | 0.52 | 2.4 GB | 11.8 % | 10.3 % |
-| canary-1b-v2 | 46 s | 0.57 | 8.0 GB | 15.2 % | 10.0 % |
+| parakeet-tdt-v2 | 14 s | **0.17** | 5.3 GB | 3.0 % | 1.4 % |
+| canary-qwen-2.5b | 74 s | 0.93 | 10.4 GB | 3.4 % | 1.5 % |
+| granite-speech-4.1 | 42 s | 0.53 | 9.0 GB | 3.4 % | 1.6 % |
+| whisper-large-v3 | 150 s | 1.87 | 3.6 GB | 3.8 % | 1.8 % |
+| distil-whisper-large-v3 | 27 s | 0.33 | 2.3 GB | 3.8 % | 1.7 % |
+| canary | 34 s | 0.42 | 6.7 GB | 5.1 % | 1.4 % |
+| parakeet-tdt-v3 | 17 s | 0.22 | 5.4 GB | 5.1 % | 2.5 % |
+| parakeet-ctc-1.1b | 21 s | 0.26 | 8.3 GB | 5.1 % | 1.6 % |
+| moonshine-base | 17 s | 0.21 | **0.8 GB** | 5.1 % | 2.3 % |
+| canary-180m-flash | 15 s | 0.19 | 2.0 GB | 5.5 % | 1.7 % |
+| whisper-large-v3-turbo | 42 s | 0.52 | 2.4 GB | 5.5 % | 3.8 % |
+| canary-1b-v2 | 45 s | 0.57 | 8.0 GB | 8.5 % | 2.9 % |
 
-Read the ordering with the sample size in mind: 237 words means one word is 0.42
-points, so the block from 9.3 % to 11.8 % is a handful of words wide and is not a
-ranking. The separations that survive are the top group, the bottom, and the
-per-engine differences in the table further up.
+**This column does not separate these models, and saying so is the result.**
+237 words means one word is 0.42 points. Twelve of thirteen models sit between
+2.1 % and 5.5 % — eight words end to end — and six of them are inside a single
+word of each other. Ranking them would be reading noise. The task is too short
+and too clean to discriminate; a benchmark that cannot tell its candidates apart
+should report that rather than publish an order.
 
-`kyutai-stt-2.6b` wins this column by a distance, at RTF 2.54 — the only model
-here slower than realtime by more than a little, and the only one whose win does
-not survive a change of TTS engine.
+What the table does support is the choice on the other columns, where the spread
+is real: `parakeet-tdt-v2` is 15× faster than `kyutai-stt-2.6b`, and
+`moonshine-base` runs in 0.8 GB against `canary-qwen-2.5b`'s 10.4 GB. Those are
+factors, not fractions of a word. **On clean short English, pick on RTF and
+memory, because accuracy will not decide it for you.**
 
-Two rows are worth reading together. `parakeet-ctc-1.1b` and `parakeet-tdt-v2`
-share an encoder and differ in the decoder head; CTC scores 5.9 % against the
-transducer's 9.3 % here, and does it in less wall clock. The CER column shows the
-same split more sharply — 2.4 % against 7.9 %. A CER that high next to that WER
-means the errors are not scattered word substitutions but systematic formatting
-differences, most of them in how numbers and identifiers get written out.
+`kyutai-stt-2.6b` is the one model outside the pack at 2.1 %, and it is also the
+only one slower than realtime by a wide margin — and its win does not survive a
+change of TTS engine, so even that separation is conditional.
+
+An earlier version of this table showed a 5–6 % group cleanly separated from a
+9–11 % group, and that structure was a scoring artefact: models writing
+`4821-773` for a case ID the reference reads digit by digit were charged for the
+cardinal expansion *and* for the spoken "dash". The CER column had been flagging
+it all along — 7.9 % CER beside 9.3 % WER is not what scattered word errors look
+like — and this README said as much for several revisions without anyone
+following it up. Once both were fixed, nine of thirteen rows dropped by up to 6
+points and the structure disappeared. The remaining CER outlier is
+`whisper-large-v3-turbo` at 3.8 %.
 
 **German** — `standup-de__clean`, 94 s, 3 speakers, 226 reference words. Only six
 models claim German. The `piper` column is the same script under the other
@@ -472,21 +526,24 @@ engine:
 
 | Model | Wall clock | RTF | Peak RSS | WER (`say`) | CER (`say`) | WER (`piper`) |
 |---|---:|---:|---:|---:|---:|---:|
-| whisper-large-v3 | 155 s | 1.65 | 4.0 GB | **5.8 %** | 2.8 % | 13.3 % |
-| whisper-large-v3-turbo | 104 s | 1.11 | 2.4 GB | 6.2 % | 2.3 % | **9.3 %** |
-| parakeet-tdt-v3 | 28 s | 0.30 | 5.3 GB | 7.5 % | 3.6 % | 10.2 % |
-| canary-1b-v2 | 70 s | 0.75 | 7.8 GB | 10.2 % | 4.2 % | 9.7 % |
-| canary | 47 s | 0.51 | 7.2 GB | 20.3 % | 17.1 % | 12.4 % |
-| canary-180m-flash | 28 s | 0.29 | 2.2 GB | 23.4 % | 20.5 % | 15.9 % |
+| whisper-large-v3 | 155 s | 1.65 | 4.0 GB | **4.9 %** | 1.9 % | 12.5 % |
+| whisper-large-v3-turbo | 104 s | 1.11 | 2.4 GB | 5.4 % | 1.4 % | **8.5 %** |
+| parakeet-tdt-v3 | 28 s | 0.30 | 5.3 GB | 6.7 % | 2.7 % | 9.4 % |
+| canary-1b-v2 | 70 s | 0.75 | 7.8 GB | 9.8 % | 3.8 % | 8.9 % |
+| canary | 47 s | 0.51 | 7.2 GB | 20.1 % | 16.8 % | 11.6 % |
+| canary-180m-flash | 28 s | 0.29 | 2.2 GB | 22.8 % | 19.8 % | 15.2 % |
 
-**German is where the engine genuinely reorders the ranking.** `whisper-large-v3`
-is first on `say` and fifth of six on `piper`, losing 7.5 points; both Canary
-models go the other way and *gain* 8 and 7.5. This is a much larger effect than
-the English table shows, and it is the concrete reason the engine is an axis
-rather than a footnote. Read it with the caveat in the TTS section: the German
-Piper voices are unevenly trained, so part of this is voice quality rather than
-model behaviour, and the direction of the effect is trustworthy while the
-magnitude is not.
+**German is the only part of this benchmark that currently separates models.**
+The spread is 4.9 % to 22.8 % — a factor of nearly five, against English's
+2.1–5.5 % — so unlike the English table this one supports an ordering.
+
+**It is also where the engine genuinely reorders the ranking.**
+`whisper-large-v3` is first on `say` and fifth of six on `piper`, losing 7.6
+points; both Canary models go the other way and *gain* 8.5 and 7.6. This is a
+much larger effect than English shows, and it is the concrete reason the engine
+is an axis rather than a footnote. Read it with the caveat in the TTS section:
+the German Piper voices are unevenly trained, so part of this is voice quality
+rather than model behaviour — the direction is trustworthy, the magnitude is not.
 
 **What breaks Canary on German is what the script was built to break.** Its
 errors are concentrated in English loanwords and spoken numbers — `Backend`
@@ -495,7 +552,7 @@ says "ungefähr hundertzwanzig Millisekunden" Canary emits "ungefähr
 Millisekunden", deleting the quantity outright. Of the 23 number-words in the
 reference, `canary` keeps 15 and `canary-180m-flash` keeps 9, neither producing a
 single digit; Whisper and Parakeet write 19 digit characters instead, which score
-as correct because `score.py` normalises `120` against *hundertzwanzig*. That
+as correct because the scorer normalises `120` against *hundertzwanzig*. That
 ordering — 9, 15, then digits — tracks the WER column exactly.
 
 The CER column is the tell. A model at 20 % WER and 3 % CER is getting words

@@ -41,11 +41,53 @@ _VARIANTS = [
     (r"\bone hundred\b", "hundred"),
     (r"\bone thousand\b", "thousand"),
     (r"\bdreissig\b", "dreißig"),
+    # "one hundred and twenty" and "one hundred twenty" are both ordinary
+    # English. num2words emits the first, most references write the second,
+    # and the difference is a word neither speaker chose.
+    (r"\b(hundred|thousand|million) and\b", r"\1"),
 ]
 
 _PUNCT = re.compile(r"[^\w\s]", flags=re.UNICODE)
 _WS = re.compile(r"\s+")
 _DIGITS = re.compile(r"\d+")
+
+# Spoken names for the punctuation inside an identifier. A reference that
+# says "four eight two one dash seven seven three" and a model that writes
+# "4821-773" agree; the hyphen is stripped as punctuation while the word
+# survives, so the word becomes a deletion the model did not earn. These
+# are only removed next to a number, so an ordinary "that's a good point"
+# is still scored.
+_SEP_WORDS = {
+    "dash", "point", "dot", "hyphen", "slash",
+    "punkt", "strich", "bindestrich", "schrägstrich",
+}
+
+_NUMBER_WORDS = {
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty",
+    "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
+    "thousand", "million",
+    "null", "eins", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben",
+    "acht", "neun", "zehn", "elf", "zwölf", "dreizehn", "vierzehn",
+    "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn", "zwanzig",
+    "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig",
+    "neunzig", "hundert", "tausend",
+}
+
+
+def _drop_separators(text: str) -> str:
+    """Remove spoken punctuation words that sit next to a number."""
+    words = text.split()
+    keep = []
+    for i, w in enumerate(words):
+        if w in _SEP_WORDS:
+            prev = words[i - 1] if i else ""
+            nxt = words[i + 1] if i + 1 < len(words) else ""
+            if prev in _NUMBER_WORDS or nxt in _NUMBER_WORDS:
+                continue
+        keep.append(w)
+    return " ".join(keep)
 
 
 # ──────────────────────────────────────────────
@@ -128,16 +170,26 @@ def spell_number(value: int, lang: str) -> str:
     return join.join(p for p in parts if p)
 
 
-def _digits_to_words(text: str, lang: str) -> str:
+def _digits_to_words(text: str, lang: str, digitwise: bool = False) -> str:
     """Replace digit runs with their spelled-out form so "2 4 1" and
-    "zwei vier eins" compare equal. Prefers num2words when installed."""
+    "zwei vier eins" compare equal. Prefers num2words when installed.
+
+    `digitwise` spells each digit separately — "1227" becomes "one two two
+    seven" rather than "one thousand two hundred twenty seven". Both
+    readings occur in real speech and neither is wrong: a quantity is read
+    as a cardinal, an identifier (ticket, phone, version) digit by digit.
+    A model that writes `1227` has not told us which one it heard, so
+    scoring tries both and keeps the better — see `score()`."""
     try:
         from num2words import num2words
     except ImportError:
         num2words = None
 
     def repl(m: re.Match[str]) -> str:
-        value = int(m.group(0))
+        run = m.group(0)
+        if digitwise:
+            return " " + " ".join(spell_number(int(d), lang) for d in run) + " "
+        value = int(run)
         if num2words is not None:
             try:
                 return " " + num2words(value, lang=lang) + " "
@@ -146,6 +198,7 @@ def _digits_to_words(text: str, lang: str) -> str:
         return " " + spell_number(value, lang) + " "
 
     return _DIGITS.sub(repl, text)
+
 
 
 # ──────────────────────────────────────────────
@@ -160,20 +213,25 @@ def _strip_punct(text: str) -> str:
     return _WS.sub(" ", text).strip()
 
 
-def normalize(text: str, lang: str = "en", numbers: bool = True) -> str:
+def normalize(
+    text: str, lang: str = "en", numbers: bool = True, digitwise: bool = False
+) -> str:
     """Normalise a transcript for scoring. `numbers=False` gives the strict
-    variant behind `wer_raw`."""
+    variant behind `wer_raw`; `digitwise` spells digit runs one digit at a
+    time instead of as a cardinal."""
     lang = (lang or "en").split("-")[0].split("_")[0].lower()
     out = text or ""
     if numbers:
         # Digits are spelled out before punctuation is stripped, so a
         # version string stays one number per component rather than
         # dissolving into unrelated digits.
-        out = _digits_to_words(out, lang)
+        out = _digits_to_words(out, lang, digitwise=digitwise)
+
     out = _strip_punct(out)
     if numbers:
         for pattern, replacement in _VARIANTS:
             out = re.sub(pattern, replacement, out)
+        out = _drop_separators(out)
         out = _WS.sub(" ", out).strip()
     return out
 
@@ -255,6 +313,19 @@ def score(hypothesis: str, reference: str, lang: str = "en") -> dict | None:
     if not ref:
         return None
 
+    # A digit run does not say how it was spoken. "1227" is a cardinal if it
+    # is a quantity and a digit sequence if it is a ticket number, and a
+    # model that emits digits has discarded that distinction — while one
+    # that spells the words out has kept it. Scoring only the cardinal
+    # reading therefore charges digit-emitting models for a decision the
+    # reference made, not for anything they misheard: on
+    # support-call-en it cost parakeet-tdt-v2 5.2 WER points and moved it
+    # from 7th place to 2nd once removed. So both readings are tried, with
+    # the same rule applied to reference and hypothesis, and the better one
+    # is kept. Numeral formatting is not what this benchmark measures.
+    alt_ref = normalize(reference, lang, numbers=True, digitwise=True)
+    alt_hyp = normalize(hypothesis, lang, numbers=True, digitwise=True)
+
     # An empty hypothesis is a total miss, not a crash: every reference
     # word counts as a deletion.
     if not hyp:
@@ -268,12 +339,16 @@ def score(hypothesis: str, reference: str, lang: str = "en") -> dict | None:
     try:
         import jiwer
 
+        if jiwer.wer(alt_ref, alt_hyp) < jiwer.wer(ref, hyp):
+            ref, hyp = alt_ref, alt_hyp
         out = jiwer.process_words(ref, hyp)
         wer = out.wer
         hits, subs, dels, ins = out.hits, out.substitutions, out.deletions, out.insertions
         cer = jiwer.cer(ref, hyp)
         wer_raw = jiwer.wer(ref_raw, hyp_raw)
     except ImportError:
+        if _word_rates(alt_ref, alt_hyp)[0] < _word_rates(ref, hyp)[0]:
+            ref, hyp = alt_ref, alt_hyp
         wer, hits, subs, dels, ins = _word_rates(ref, hyp)
         cer = _char_rate(ref, hyp)
         wer_raw = _word_rates(ref_raw, hyp_raw)[0]
