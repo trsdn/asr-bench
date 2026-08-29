@@ -399,7 +399,35 @@ keeps timing and avoids splicing but costs one model load per turn. Every
 runner loads its weights on each call, so that is the difference between four
 calls and forty.
 
-## 6. Compare
+## 6. Search the configuration space
+
+```sh
+uv run python search.py \
+  --sessions sessions/crosstalk-de__piper__clean \
+             sessions/allhands-de__piper__clean \
+             sessions/allhands-en__piper__clean \
+             sessions/crosstalk-de__say__clean \
+  --holdout engine --run-name search-v1
+```
+
+Sweeps diarizer × ASR × attribution × speaker-count hint, reports the best
+configuration overall *and* the best per condition, then validates each
+winner on sessions held out of the search. `--holdout engine` trains on one
+synthesiser and validates on another, which is the strictest split available
+here — the engine reorders the model ranking outright, so a config picked and
+validated on the same synthesiser has proved nothing about speech.
+
+`--samples N` switches from the full grid to random search. `--dry-run`
+prints the plan and the evaluation count before committing the machine to an
+hour of work. Diarisation is cached across ASR models within a run, which is
+what makes the sweep affordable: the diarizer does not depend on what
+transcribes afterwards.
+
+`--halving` drops the worst half of the field after each session. It is off
+by default and refuses to run when the sessions span more than one condition,
+for a reason discovered by running it: see below.
+
+## 7. Compare
 
 ```sh
 uv run python compare.py --run-name standup-de__say__phone_2026-08-28_01-14-22
@@ -820,6 +848,85 @@ model cleaner input than the overlapped whole. English 5.6 % flat vs 12.4 %
 attributed, +6.8 points. So the "roughly a quarter of your word accuracy"
 figure from the four-speaker table is a data point, not a law.
 
+### The config search: what one answer costs you
+
+18 configurations (3 diarizers × 3 ASR models × speaker-count hint on/off) on
+three sessions, `say` held out against `piper`. 54 evaluations, about 75
+minutes.
+
+| | best config | cpWER |
+|---|---|---:|
+| **Best overall** (mean of three) | `titanet` + `parakeet-tdt-v3`, n=auto | 25.8 % |
+| de, 4 speakers | `sortformer` + `whisper-large-v3` | **18.6 %** |
+| de, 6 speakers | `titanet` + `parakeet-tdt-v3`, n=**known** | **21.5 %** |
+| en, 6 speakers | `titanet` + `parakeet-tdt-v3`, n=auto | **12.4 %** |
+
+**The single best configuration is the best one nowhere except English.** Run
+it on the four-speaker German session and it scores 32.4 % against the 18.6 %
+a condition-aware choice gets — **13.8 points paid for the convenience of one
+answer.** Across the three conditions the average penalty is 8.3 points. That
+is the price of "just tell me which model to use", measured rather than
+asserted, and it is the argument for the pipeline being configurable at all.
+
+**Held out, the winner holds up.** `sortformer` + `whisper-large-v3` picked on
+`crosstalk-de__piper` scores 18.6 % there and 12.8 % on the same conversation
+synthesised by `say` — a *negative* gap of 5.9 points. The held-out session is
+easier, not the config overfitted. This is the check that would have caught it
+if it had.
+
+**The speaker-count hint is a property of the diarizer, not of the run.** For
+both Sortformer variants, `n=auto` and `n=known` are bit-identical in all 18
+cells — mechanical confirmation that a fixed-channel architecture cannot use
+the hint. For TitaNet the hint is worth 10–29 points, and its *sign* is
+constant within a session across all three ASR models:
+
+| Session | parakeet | whisper | canary |
+|---|---:|---:|---:|
+| `crosstalk-de` (4 spk) | +21.6 | +15.2 | +10.8 |
+| `allhands-de` (6 spk) | **−11.1** | **−9.5** | **−13.1** |
+| `allhands-en` (6 spk) | +22.7 | +28.6 | +26.8 |
+
+(positive = telling the truth makes it worse)
+
+Nine measurements, three flips of sign, and never once a disagreement between
+ASR models on the same audio. So the effect is **reproducible but not
+predictable**: it belongs to the diarizer-audio pair, and nothing a caller
+knows in advance — language, speaker count, overlap — tells you which way it
+will go. Searching it is not laziness, it is the only sound option.
+
+**The diarizer dominates; the ASR model barely matters.** Within one diarizer
+and session the three ASR models span 2–4 points. Across diarizers on the same
+session the spread is 55 points. Almost all the accuracy in a speaker-attributed
+transcript is decided before a word is decoded — which is the exact opposite of
+where a model comparison table directs your attention.
+
+That has a cheap consequence: on `allhands-en`, `canary-180m-flash` scores
+15.9 % in 25 s where `whisper-large-v3` scores 13.0 % in 207 s. **Eight times
+faster for 2.9 points**, once a competent diarizer is doing the hard part.
+
+### Where the search harness was wrong about itself
+
+The first run of `search.py` used successive halving, and it produced a
+confident, wrong answer. Round one ran all 18 configs on the four-speaker
+session and eliminated every TitaNet configuration — correctly, TitaNet is the
+worst backend there by 20 points. TitaNet is also the **winner at six
+speakers** by 26 points, and it was never measured there.
+
+Halving assumes a configuration that loses on the first session loses
+everywhere. That assumption is precisely what the rest of this README
+refutes. The two ideas are incompatible: you cannot budget by early
+elimination while searching for condition-dependent winners.
+
+`--halving` is now off by default and refuses to run when the development
+sessions span more than one condition, printing why. It remains useful for
+sweeping many sessions of the *same* condition, which is the case it was
+designed for.
+
+The same run also compared a six-speaker development mean against a
+four-speaker held-out session and reported a 39-point gap as evidence of
+overfitting. It was measuring difficulty. Held-out validation is now
+condition-matched.
+
 ## Repo layout
 
 | File | Role |
@@ -832,6 +939,7 @@ figure from the four-speaker table is a data point, not a law.
 | `test_score.py` | regression tests for the normalisation rules |
 | `rescore.py` | re-scores stored transcripts after a `score.py` change, no model runs |
 | `pipeline.py` | diarise → transcribe per speaker → cpWER, as one configurable pipeline |
+| `search.py` | sweeps the pipeline config space, best overall and best per condition, held-out validated |
 | `compare.py` | run directory → Markdown report |
 | `audio_io.py` | shared decode/encode helpers (ffmpeg + libsndfile) |
 | `envfile.py` | loads `.env` before torch/NeMo import, so caches land where you asked |

@@ -190,24 +190,49 @@ def transcribe_by_segment(
                         "errors": errors}
 
 
-def run_pipeline(
-    session_dir: Path, config: PipelineConfig, channel: str = "mixed",
-    baseline_wer: bool = True,
-) -> dict:
+_DIAR_CACHE: dict[tuple, object] = {}
+
+
+def diarize_cached(diarizer: str, session_dir: Path, channel: str,
+                   num_speakers: int | None, params: dict | None,
+                   audio, use_cache: bool = False):
+    """Diarise, optionally reusing an identical earlier result.
+
+    Diarisation depends on the audio and the backend, never on which ASR
+    model runs afterwards, so a search that sweeps ASR models re-runs the
+    same diarisation dozens of times. That is the single largest avoidable
+    cost in a config sweep. Off by default: a one-shot `pipeline.py` run
+    should stay honest about wall clock."""
+    key = (str(session_dir), channel, diarizer, num_speakers,
+           json.dumps(params or {}, sort_keys=True))
+    if use_cache and key in _DIAR_CACHE:
+        return _DIAR_CACHE[key], True
+
     import diarize
 
+    result = diarize.diarize_channel(
+        diarizer, session_dir, channel, num_speakers=num_speakers,
+        params=params or None, audio=audio,
+    )
+    if use_cache:
+        _DIAR_CACHE[key] = result
+    return result, False
+
+
+def run_pipeline(
+    session_dir: Path, config: PipelineConfig, channel: str = "mixed",
+    baseline_wer: bool = True, cache_diarization: bool = False,
+) -> dict:
     session = json.loads((session_dir / "session.json").read_text())
     language = config.language or session.get("language", "en")
     audio = load_mono_16k(session_dir / "audio" / f"{channel}.wav")
 
     started = time.perf_counter()
-    diar = diarize.diarize_channel(
-        config.diarizer, session_dir, channel,
-        num_speakers=config.num_speakers,
-        params=config.diarizer_params or None,
-        audio=audio,
+    diar, was_cached = diarize_cached(
+        config.diarizer, session_dir, channel, config.num_speakers,
+        config.diarizer_params, audio, use_cache=cache_diarization,
     )
-    diar_seconds = round(time.perf_counter() - started, 2)
+    diar_seconds = 0.0 if was_cached else round(time.perf_counter() - started, 2)
 
     if diar.error or not diar.turns:
         return {
@@ -257,6 +282,7 @@ def run_pipeline(
         "num_speakers_hint": config.num_speakers,
         "audio_seconds": round(len(audio) / TARGET_SR, 2),
         "diarization_seconds": diar_seconds,
+        "diarization_cached": was_cached,
         "speakers_found": diar.speakers_found,
         "reference_speakers": len({t["speaker"] for t in ref_turns}),
         "der": diar.accuracy.get("der") if diar.accuracy else None,
