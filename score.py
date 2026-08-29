@@ -585,3 +585,215 @@ def diarization_error_rate(
         }
 
     return result
+
+
+# ──────────────────────────────────────────────
+# Speaker-attributed transcription: cpWER
+# ──────────────────────────────────────────────
+#
+# WER and DER measure different halves of the same job and neither one
+# answers the question a meeting transcript is actually judged on: are the
+# right words attributed to the right person? A pipeline can score 5 % WER
+# and 20 % DER and still produce minutes nobody can use, because the
+# sentence is correct and filed under the wrong name.
+#
+# cpWER (concatenated minimum-permutation WER, from CHiME-6/7 DASR) closes
+# that gap. Concatenate every speaker's utterances into one stream per
+# speaker on both sides, find the speaker mapping that minimises total
+# errors, and report WER over the whole thing. A speaker the system never
+# found costs all their words as deletions; a speaker it invented costs all
+# of theirs as insertions. There is no collar and no free pass: attribution
+# errors show up as substitutions in the stream they landed in *and* as
+# deletions in the one they left.
+#
+# It is deliberately harsh, and that harshness is the point — it is the
+# only number here that a pipeline configuration can be selected on,
+# because it is the only one that both halves can lose.
+
+
+def _speaker_streams(turns: list[dict]) -> dict[str, str]:
+    """Concatenate each speaker's text in the order given.
+
+    Order matters: cpWER compares streams, so shuffling a speaker's turns
+    changes the alignment. Callers pass turns in time order, which is what
+    both `reference.json` and the pipeline output already do."""
+    streams: dict[str, list[str]] = {}
+    for turn in turns:
+        text = (turn.get("text") or "").strip()
+        if not text:
+            continue
+        streams.setdefault(str(turn["speaker"]), []).append(text)
+    return {spk: " ".join(parts) for spk, parts in streams.items()}
+
+
+def _pair_errors(hyp_text: str, ref_text: str, lang: str) -> tuple[int, int]:
+    """(errors, reference words) for one hypothesis stream against one
+    reference stream, using the same normalisation as `score()` so a
+    numeral-formatting difference does not count here either."""
+    if not ref_text.strip():
+        # Nothing to match: every hypothesis word is an insertion.
+        return len(normalize(hyp_text, lang, numbers=True).split()), 0
+    result = score(hyp_text, ref_text, lang)
+    if result is None:
+        return 0, 0
+    errors = result["substitutions"] + result["deletions"] + result["insertions"]
+    return errors, result["reference_words"]
+
+
+def cp_wer(
+    reference: list[dict],
+    hypothesis: list[dict],
+    lang: str = "en",
+) -> dict | None:
+    """Score a speaker-attributed transcript.
+
+    Both arguments are lists of dicts with `speaker` and `text`, in time
+    order — the shape `reference.json` already stores and the shape a
+    pipeline emits. Speaker labels are arbitrary on the hypothesis side and
+    are matched by content, not by name.
+
+    Returns cpWER plus the per-speaker breakdown and the mapping that was
+    chosen, or None when the reference has no words.
+    """
+    ref_streams = _speaker_streams(reference)
+    hyp_streams = _speaker_streams(hypothesis)
+    if not ref_streams:
+        return None
+
+    ref_labels = sorted(ref_streams)
+    hyp_labels = sorted(hyp_streams)
+
+    # Cost matrix of hypothesis stream × reference stream. Total errors
+    # decompose as a sum over assigned pairs plus the unassigned ones, and
+    # the denominator is fixed, so minimising the assignment cost minimises
+    # cpWER exactly — this is not an approximation.
+    cost: dict[tuple[str, str], int] = {}
+    ref_words: dict[str, int] = {}
+    for h in hyp_labels:
+        for r in ref_labels:
+            errs, nwords = _pair_errors(hyp_streams[h], ref_streams[r], lang)
+            cost[(h, r)] = errs
+            ref_words[r] = nwords
+
+    # An unmatched reference speaker costs all their words as deletions; an
+    # unmatched hypothesis speaker costs all of theirs as insertions.
+    miss_cost = {r: ref_words.get(r, 0) for r in ref_labels}
+    extra_cost = {
+        h: len(normalize(hyp_streams[h], lang, numbers=True).split())
+        for h in hyp_labels
+    }
+
+    mapping = _assign_speakers(hyp_labels, ref_labels, cost, miss_cost, extra_cost)
+
+    total_ref = sum(ref_words.get(r, 0) for r in ref_labels)
+    if total_ref == 0:
+        return None
+
+    errors = 0
+    per_speaker = {}
+    for r in ref_labels:
+        h = next((hh for hh, rr in mapping.items() if rr == r), None)
+        if h is None:
+            errors += miss_cost[r]
+            per_speaker[r] = {
+                "matched": None,
+                "errors": miss_cost[r],
+                "reference_words": ref_words.get(r, 0),
+                "wer": 1.0 if ref_words.get(r, 0) else None,
+            }
+            continue
+        e = cost[(h, r)]
+        errors += e
+        nw = ref_words.get(r, 0)
+        per_speaker[r] = {
+            "matched": h,
+            "errors": e,
+            "reference_words": nw,
+            "wer": round(e / nw, 4) if nw else None,
+        }
+    for h in hyp_labels:
+        if h not in mapping:
+            errors += extra_cost[h]
+
+    return {
+        "cpwer": round(errors / total_ref, 4),
+        "errors": int(errors),
+        "reference_words": int(total_ref),
+        "reference_speakers": len(ref_labels),
+        "hypothesis_speakers": len(hyp_labels),
+        "missed_speakers": sum(1 for r in ref_labels
+                               if not any(rr == r for rr in mapping.values())),
+        "extra_speakers": sum(1 for h in hyp_labels if h not in mapping),
+        "mapping": {str(h): str(r) for h, r in sorted(mapping.items())},
+        "per_speaker": per_speaker,
+    }
+
+
+def _assign_speakers(
+    hyp_labels: list[str],
+    ref_labels: list[str],
+    cost: dict[tuple[str, str], int],
+    miss_cost: dict[str, int],
+    extra_cost: dict[str, int],
+) -> dict[str, str]:
+    """Hypothesis→reference assignment minimising total errors.
+
+    Padded to a square matrix so leaving a speaker unassigned is a choice
+    the solver can make and price, rather than something forced by the
+    shapes. That matters when a system splits one person into two: pairing
+    both fragments is impossible, and the cheaper fragment should be
+    allowed to go unmatched rather than displace a real speaker."""
+    if not hyp_labels or not ref_labels:
+        return {}
+
+    n = max(len(hyp_labels), len(ref_labels))
+    try:
+        import numpy as np
+        from scipy.optimize import linear_sum_assignment
+
+        matrix = np.zeros((n, n), dtype=float)
+        for i in range(n):
+            for j in range(n):
+                if i < len(hyp_labels) and j < len(ref_labels):
+                    matrix[i, j] = cost[(hyp_labels[i], ref_labels[j])]
+                elif i < len(hyp_labels):
+                    # Hypothesis speaker matched to nothing: all insertions.
+                    matrix[i, j] = extra_cost[hyp_labels[i]]
+                elif j < len(ref_labels):
+                    # Reference speaker matched to nothing: all deletions.
+                    matrix[i, j] = miss_cost[ref_labels[j]]
+        rows, cols = linear_sum_assignment(matrix)
+        return {
+            hyp_labels[i]: ref_labels[j]
+            for i, j in zip(rows, cols)
+            if i < len(hyp_labels) and j < len(ref_labels)
+        }
+    except ImportError:
+        pass
+
+    import itertools
+
+    if n <= MAX_EXHAUSTIVE_LABELS:
+        best, best_map = None, {}
+        shorter, longer = (hyp_labels, ref_labels) if len(hyp_labels) <= len(ref_labels) \
+            else (ref_labels, hyp_labels)
+        for perm in itertools.permutations(longer, len(shorter)):
+            pairs = list(zip(shorter, perm)) if shorter is hyp_labels \
+                else [(h, r) for r, h in zip(shorter, perm)]
+            total = sum(cost[(h, r)] for h, r in pairs)
+            total += sum(miss_cost[r] for r in ref_labels
+                         if r not in {r for _, r in pairs})
+            total += sum(extra_cost[h] for h in hyp_labels
+                         if h not in {h for h, _ in pairs})
+            if best is None or total < best:
+                best, best_map = total, dict(pairs)
+        return best_map
+
+    mapping, used_ref, used_hyp = {}, set(), set()
+    for (h, r), _c in sorted(cost.items(), key=lambda kv: kv[1]):
+        if h in used_hyp or r in used_ref:
+            continue
+        mapping[h] = r
+        used_hyp.add(h)
+        used_ref.add(r)
+    return mapping

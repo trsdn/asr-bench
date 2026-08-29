@@ -41,6 +41,52 @@ CASES = [
 ]
 
 
+# Speaker-attributed cases. A meeting transcript is judged on whether the
+# right words are filed under the right person, and flat WER cannot see
+# that at all — the first case below is word-perfect (WER 0.000) with one
+# turn misfiled, which is exactly the failure that makes minutes unusable.
+_REF = [
+    {"speaker": "a", "text": "we should ship on friday"},
+    {"speaker": "b", "text": "i disagree the tests are red"},
+    {"speaker": "a", "text": "then we fix them first"},
+]
+
+CP_CASES = [
+    # Labels are arbitrary and matched by content, not by name.
+    ("perfect, relabelled", [
+        {"speaker": "spk1", "text": "we should ship on friday"},
+        {"speaker": "spk0", "text": "i disagree the tests are red"},
+        {"speaker": "spk1", "text": "then we fix them first"},
+    ], 0.0),
+
+    # Every word correct, one turn attributed to the wrong speaker.
+    # Flat WER on the same text is 0.000.
+    ("word-perfect, one turn misfiled", [
+        {"speaker": "spk1", "text": "we should ship on friday"},
+        {"speaker": "spk0", "text": "i disagree the tests are red"},
+        {"speaker": "spk0", "text": "then we fix them first"},
+    ], 0.625),
+
+    # The collapse this repo measured 14 times out of 15 diarisation
+    # failures: two real speakers merged into one.
+    ("all speech merged into one speaker", [
+        {"speaker": "spk0", "text": "we should ship on friday i disagree "
+                                    "the tests are red then we fix them first"},
+    ], 0.75),
+
+    # An invented speaker must cost something, or a system can hedge by
+    # splitting everyone in two.
+    ("phantom third speaker", [
+        {"speaker": "spk1", "text": "we should ship on friday"},
+        {"speaker": "spk0", "text": "i disagree the tests are red"},
+        {"speaker": "spk2", "text": "then we fix them first"},
+    ], 0.625),
+
+    # Nothing recognised at all is a total loss, not a crash.
+    ("empty hypothesis", [], 1.0),
+]
+
+
 def main() -> int:
     failures = 0
     for hyp, ref, lang, expected in CASES:
@@ -51,7 +97,18 @@ def main() -> int:
         print(f"{mark} [{lang}] {hyp!r:42s} wer={got:.3f}"
               + ("" if ok else f" expected {expected:.3f}"))
 
-    print(f"\n{len(CASES) - failures}/{len(CASES)} passed")
+    print()
+    for name, hyp, expected in CP_CASES:
+        result = score.cp_wer(_REF, hyp, "en")
+        got = 1.0 if result is None else result["cpwer"]
+        ok = abs(got - expected) < 1e-6
+        failures += not ok
+        mark = "ok  " if ok else "FAIL"
+        print(f"{mark} [cp] {name:42s} cpwer={got:.3f}"
+              + ("" if ok else f" expected {expected:.3f}"))
+
+    total = len(CASES) + len(CP_CASES)
+    print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 
 
