@@ -904,8 +904,42 @@ That has a cheap consequence: on `allhands-en`, `canary-180m-flash` scores
 15.9 % in 25 s where `whisper-large-v3` scores 13.0 % in 207 s. **Eight times
 faster for 2.9 points**, once a competent diarizer is doing the hard part.
 
-### Where the search harness was wrong about itself
+### Multi-model fusion: real, and not worth it
 
+`--fusion rover` runs every model in `--asr` on each speaker stream and votes
+word by word. `--fusion escalate` runs the first two and sends only the
+speakers where they *disagree* to the third — disagreement between two cheap
+models is a confidence signal that needs no reference, so it works on real
+audio, not just on benchmarks.
+
+| Session | best single model | `rover` (3 models) | `escalate` |
+|---|---|---|---|
+| `allhands-en`, titanet | 12.4 % / 117 s | **12.1 %** / 313 s | **12.1 %** / 206 s |
+| `allhands-de`, titanet n=6 | 21.5 % / 106 s | **20.6 %** / 247 s | **20.6 %** / 231 s |
+
+**Fusion works and it barely matters.** Three models buy 0.3 points in
+English and 0.9 in German, for two to three times the compute. On the same
+German session, choosing TitaNet over Sortformer is worth **25.7 points**. The
+diarizer is worth roughly thirty times what the ASR ensemble is worth, and
+compute spent on a second and third opinion is compute not spent on the half
+of the pipeline that decides the outcome.
+
+**Escalation does exactly what it promises, when the premise holds.** In
+English it escalated 5 of 9 speaker streams and reached the *identical* cpWER
+as full fusion for a third less wall clock — the four skipped streams were
+ones where the third opinion would not have changed the vote. In German it
+escalated 6 of 6 and saved nothing: with a weaker base model the cheap pair
+rarely agrees, so the policy degenerates into full fusion. **The saving is a
+function of how often your models already agree**, which is worth measuring
+before designing around it.
+
+One structural note that falls out of ROVER and is easy to get wrong: with
+two hypotheses there is never a majority, so voting returns the pivot
+unchanged. **Fusion needs three voters to do anything at all.** Paying for a
+second model buys nothing unless you also pay for a third, or use the second
+only as an escalation trigger — which is what `escalate` does.
+
+### Where the search harness was wrong about itself
 The first run of `search.py` used successive halving, and it produced a
 confident, wrong answer. Round one ran all 18 configs on the four-speaker
 session and eliminated every TitaNet configuration — correctly, TitaNet is the
@@ -940,6 +974,7 @@ condition-matched.
 | `rescore.py` | re-scores stored transcripts after a `score.py` change, no model runs |
 | `pipeline.py` | diarise → transcribe per speaker → cpWER, as one configurable pipeline |
 | `search.py` | sweeps the pipeline config space, best overall and best per condition, held-out validated |
+| `fuse.py` | ROVER voting over several ASR hypotheses + the reference-free agreement signal |
 | `compare.py` | run directory → Markdown report |
 | `audio_io.py` | shared decode/encode helpers (ffmpeg + libsndfile) |
 | `envfile.py` | loads `.env` before torch/NeMo import, so caches land where you asked |

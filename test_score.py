@@ -9,6 +9,7 @@ Runs without pytest — `python test_score.py` — because the repo has no
 test dependency and scoring must stay usable without one.
 """
 
+import fuse
 import score
 
 # (hypothesis, reference, language, expected WER or None for "just show it")
@@ -87,6 +88,24 @@ CP_CASES = [
 ]
 
 
+# Fusion. ROVER can only overrule the pivot when a majority disagrees, so
+# the two-voter no-op is a property worth pinning: paying for a second
+# model buys nothing on its own.
+FUSE_CASES = [
+    ("majority overrules a pivot neighbour", ["a b c", "a x c", "a b c"], "a b c"),
+    ("majority overrules the pivot",         ["a x c", "a b c", "a b c"], "a b c"),
+    ("two voters leave the pivot alone",     ["a b c", "a x c"],          "a b c"),
+    ("majority deletes a word",              ["a b c", "a b", "a b"],     "a b"),
+    ("majority inserts a word",              ["a b c", "a b b c", "a b b c"], "a b b c"),
+    ("empty input",                          [""],                        ""),
+]
+
+AGREEMENT_CASES = [
+    ("identical",       ["a b c d", "a b c d"], 1.0),
+    ("one word differs", ["a b c d", "a x c d"], 0.75),
+]
+
+
 def main() -> int:
     failures = 0
     for hyp, ref, lang, expected in CASES:
@@ -107,7 +126,23 @@ def main() -> int:
         print(f"{mark} [cp] {name:42s} cpwer={got:.3f}"
               + ("" if ok else f" expected {expected:.3f}"))
 
-    total = len(CASES) + len(CP_CASES)
+    print()
+    for name, hyps, expected in FUSE_CASES:
+        got = fuse.rover(hyps)
+        ok = got == expected
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} [fuse] {name:42s} -> {got!r}"
+              + ("" if ok else f" expected {expected!r}"))
+
+    for name, hyps, expected in AGREEMENT_CASES:
+        got = fuse.agreement(hyps)
+        ok = abs(got - expected) < 1e-9
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} [fuse] agreement {name:32s} -> {got:.3f}"
+              + ("" if ok else f" expected {expected:.3f}"))
+
+    total = (len(CASES) + len(CP_CASES) + len(FUSE_CASES)
+             + len(AGREEMENT_CASES))
     print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 

@@ -38,6 +38,7 @@ import numpy as np
 
 import envfile  # noqa: F401  — loads .env before torch/NeMo import
 
+import fuse
 import score
 from audio_io import load_mono_16k
 
@@ -73,10 +74,18 @@ class PipelineConfig:
     num_speakers: int | None = None  # None = let the backend decide
     language: str | None = None      # None = take it from session.json
     diarizer_params: dict = field(default_factory=dict)
+    # first    = use asr[0] only (the single-model pipeline)
+    # rover    = run every model in `asr` and vote word by word
+    # escalate = run asr[:2]; where they disagree, re-run that speaker on
+    #            asr[2] and vote over all three
+    fusion: str = "first"
+    escalate_below: float = 0.85     # agreement threshold for `escalate`
 
     def key(self) -> str:
         n = "auto" if self.num_speakers is None else str(self.num_speakers)
-        return f"{self.diarizer}+{'+'.join(self.asr)}@{self.attribution}/n={n}"
+        models = "+".join(self.asr) if self.fusion != "first" else self.asr[0]
+        tag = "" if self.fusion == "first" else f"/{self.fusion}"
+        return f"{self.diarizer}+{models}@{self.attribution}/n={n}{tag}"
 
 
 def merge_turns(turns: list[dict], max_gap: float = 0.5) -> list[dict]:
@@ -160,6 +169,61 @@ def transcribe_by_speaker(
                         "errors": errors}
 
 
+def transcribe_fused(
+    audio: np.ndarray, turns: list[dict], config: PipelineConfig, language: str
+) -> tuple[list[dict], dict]:
+    """Multi-model transcription per speaker: vote, or escalate then vote.
+
+    Escalation runs the first two models on every speaker and the third only
+    on the speakers where they disagree. The saving is real but bounded by
+    the cheap pair: two models plus a fraction of a third, against three."""
+    from bench import run_model
+
+    streams = build_speaker_streams(audio, turns)
+    attributed, calls, errors = [], [], []
+    escalated, considered, agreements = 0, 0, []
+
+    for speaker in sorted(streams):
+        stream = streams[speaker]
+        if stream.size < MIN_SEGMENT_SECONDS * TARGET_SR:
+            continue
+
+        first_round = config.asr[:2] if config.fusion == "escalate" else config.asr
+        texts = []
+        for model_key in first_round:
+            started = time.perf_counter()
+            text, error = run_model(model_key, stream, language)
+            calls.append(round(time.perf_counter() - started, 2))
+            if error:
+                errors.append(f"{speaker}/{model_key}: {error}")
+                continue
+            texts.append(text)
+        if not texts:
+            continue
+
+        if config.fusion == "escalate" and len(config.asr) > 2:
+            considered += 1
+            score_now = fuse.agreement(texts)
+            agreements.append(round(score_now, 4))
+            if score_now < config.escalate_below:
+                escalated += 1
+                started = time.perf_counter()
+                text, error = run_model(config.asr[2], stream, language)
+                calls.append(round(time.perf_counter() - started, 2))
+                if error:
+                    errors.append(f"{speaker}/{config.asr[2]}: {error}")
+                else:
+                    texts.append(text)
+
+        attributed.append({"speaker": speaker, "text": fuse.rover(texts)})
+
+    return attributed, {
+        "asr_calls": len(calls), "asr_seconds": sum(calls), "errors": errors,
+        "escalated_speakers": escalated, "escalation_candidates": considered,
+        "agreement": agreements,
+    }
+
+
 def transcribe_by_segment(
     audio: np.ndarray, turns: list[dict], model_key: str, language: str
 ) -> tuple[list[dict], dict]:
@@ -241,9 +305,12 @@ def run_pipeline(
         }
 
     turns = merge_turns([t.to_json() for t in diar.turns])
-    transcribe = (transcribe_by_speaker if config.attribution == "speaker"
-                  else transcribe_by_segment)
-    attributed, asr_cost = transcribe(audio, turns, config.asr[0], language)
+    if config.fusion != "first" and len(config.asr) > 1:
+        attributed, asr_cost = transcribe_fused(audio, turns, config, language)
+    else:
+        transcribe = (transcribe_by_speaker if config.attribution == "speaker"
+                      else transcribe_by_segment)
+        attributed, asr_cost = transcribe(audio, turns, config.asr[0], language)
 
     reference = json.loads((session_dir / "reference.json").read_text())
     ref_turns = reference["channels"][channel]
@@ -305,7 +372,14 @@ def main() -> int:
     ap.add_argument("--channel", default="mixed")
     ap.add_argument("--diarizer", default="sortformer")
     ap.add_argument("--asr", default="parakeet-tdt-v3",
-                    help="comma-separated; only the first is used for now")
+                    help="comma-separated; with --fusion, all of them are used")
+    ap.add_argument("--fusion", choices=["first", "rover", "escalate"],
+                    default="first",
+                    help="first: asr[0] only. rover: run all and vote. "
+                         "escalate: run asr[:2], send disagreeing speakers "
+                         "to asr[2], then vote")
+    ap.add_argument("--escalate-below", type=float, default=0.85,
+                    help="agreement below which a speaker is escalated")
     ap.add_argument("--attribution", choices=["speaker", "segment"],
                     default="speaker")
     ap.add_argument("--num-speakers", type=int, default=None,
@@ -324,6 +398,8 @@ def main() -> int:
         attribution=args.attribution,
         num_speakers=args.num_speakers,
         language=args.language,
+        fusion=args.fusion,
+        escalate_below=args.escalate_below,
     )
     result = run_pipeline(args.session, config, args.channel,
                           baseline_wer=not args.no_baseline)

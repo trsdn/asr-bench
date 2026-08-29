@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`fuse.py` — multi-model voting and selective escalation, measured and found marginal.** `--fusion rover` runs several ASR models per speaker stream and votes word by word; `--fusion escalate` runs two and sends only the speakers where they *disagree* to a third, using inter-model disagreement as a confidence signal that needs no reference and therefore works on real audio.
+
+  Both work. Neither is worth much. Three models buy **0.3 points in English and 0.9 in German for two to three times the compute**, while on the same German session choosing TitaNet over Sortformer is worth 25.7 points. The diarizer is worth about thirty times what the ASR ensemble is worth.
+
+  Escalation behaves exactly as designed when its premise holds: in English it escalated 5 of 9 streams and reached the identical cpWER as full fusion for a third less wall clock. In German it escalated 6 of 6 and saved nothing, because a weaker base model makes the cheap pair disagree everywhere. The saving is a function of how often the models already agree, which is worth measuring before designing around it.
+
+  One structural property, pinned in the tests: with two hypotheses there is never a majority, so voting returns the pivot unchanged. **Fusion needs three voters to do anything at all** — a second model buys nothing unless a third follows, or unless it is used purely as an escalation trigger.
+
 - **`search.py` — the pipeline config space, searched rather than assumed.** Sweeps diarizer × ASR × attribution × speaker-count hint and reports two different answers: the best configuration overall, and the best one *per condition* (language × speaker count). The gap between them is the finding. On three sessions the single best config — `titanet` + `parakeet-tdt-v3` with the speaker count left to the backend, 25.8 % mean cpWER — is the best choice **nowhere except English**. Applied to the four-speaker German session it scores 32.4 % where a condition-aware choice gets 18.6 %: **13.8 points paid for the convenience of one answer**, 8.3 points averaged across conditions. That is the price of "just tell me which model to use", measured instead of asserted.
 
   Held-out validation is built in and on by default, because the TTS engine reorders model rankings outright: `--holdout engine` picks on one synthesiser and validates on another, condition-matched. The first winner survived it (18.6 % on `piper`, 12.8 % on `say`).
