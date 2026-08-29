@@ -369,7 +369,37 @@ uv run python diarize.py --sweep \
 
 The one change with cross-session evidence behind it is the VAD threshold, which is why the default is −40 dB rather than the −33 dB this repo started with.
 
-## 5. Compare
+## 5. Run the whole pipeline
+
+`bench.py` asks which model transcribes best and `diarize.py` asks which
+backend separates speakers best. A meeting transcript is judged on neither:
+it is judged on whether the right words end up under the right person, and a
+configuration can win both halves separately and still produce unusable
+minutes.
+
+```sh
+uv run python pipeline.py --session sessions/crosstalk-de__piper__clean \
+    --diarizer sortformer --asr parakeet-tdt-v3 --num-speakers 4
+```
+
+Diarise first, then transcribe per speaker, then score with **cpWER**. The
+ordering is deliberate: transcribe-first attribution needs word-level
+timestamps from every backend, which not all of them expose and none expose
+the same way, while diarise-first needs nothing from an ASR model except
+that it accepts samples — so all thirteen models are usable immediately.
+
+What the caller knows is part of the configuration, not a fixed fact. You
+usually do know how many people are in the room and what language they speak,
+and a backend given that information is a different algorithm from one
+guessing it. `--num-speakers` and `--language` are knobs to search over.
+
+`--attribution speaker` (the default) concatenates each speaker's audio and
+makes one ASR call per speaker; `segment` calls per diarised turn, which
+keeps timing and avoids splicing but costs one model load per turn. Every
+runner loads its weights on each call, so that is the difference between four
+calls and forty.
+
+## 6. Compare
 
 ```sh
 uv run python compare.py --run-name standup-de__say__phone_2026-08-28_01-14-22
@@ -431,6 +461,29 @@ whole result history costs seconds and no GPU.
 ```sh
 uv pip install jiwer num2words
 ```
+
+### Speaker-attributed transcription: cpWER
+
+WER and DER measure different halves of the same job and neither answers the
+question a meeting transcript is judged on. A pipeline can score 5 % WER and
+20 % DER and still produce minutes nobody can use, because every sentence is
+correct and half of them are filed under the wrong name.
+
+**cpWER** (concatenated minimum-permutation WER, from CHiME-6/7 DASR) closes
+that gap. Each speaker's utterances are concatenated into one stream per
+side, the speaker assignment that minimises total errors is found, and WER is
+reported over the whole thing. Assignment is by content, so a system labelling
+people `spk0`/`spk1` is not punished for it. A speaker never found costs all
+their words as deletions; an invented one costs all of its own as insertions,
+otherwise a system could hedge by splitting everyone in two.
+
+The assignment is exact, not heuristic: total errors decompose as a sum over
+assigned pairs and the denominator is fixed, so Hungarian on the padded error
+matrix minimises cpWER itself.
+
+How much this sees that WER cannot: three turns, every word transcribed
+correctly, one turn attributed to the wrong speaker. **Flat WER scores that
+0.0 %. cpWER scores it 62.5 %.** That case is in `test_score.py`.
 
 ### Diarisation: DER
 
@@ -658,6 +711,53 @@ Canary mangles the English technical vocabulary sprinkled through the German dia
 
 Each model runs in its own subprocess. That costs a few seconds of start-up per cell and buys honest memory numbers: `ru_maxrss` is a per-process high-water mark, so a matrix run in one process reports the largest model's peak for every model after it. Pass `--in-process` to skip the isolation when you only care about accuracy.
 
+### Pipeline results: the halves do not add up
+
+`crosstalk-de__piper__clean`, 67 s, 4 speakers, 9.3 % overlapping speech,
+scored end to end with cpWER:
+
+| Diarizer | ASR | speakers told | cpWER | DER | speakers found | Wall clock |
+|---|---|---|---:|---:|---:|---:|
+| sortformer | whisper-large-v3 | 4 | **18.6 %** | 1.0 % | 4 | 94 s |
+| sortformer | parakeet-tdt-v3 | 4 | 20.6 % | 0.5 % | 4 | 55 s |
+| sortformer-streaming | parakeet-tdt-v3 | 4 | 22.1 % | 1.1 % | 4 | **49 s** |
+| titanet | parakeet-tdt-v3 | *auto* | 32.4 % | 15.2 % | 10 | 117 s |
+| titanet | parakeet-tdt-v3 | 4 | 53.9 % | 24.5 % | 4 | 65 s |
+
+**Telling the clustering backend the right answer makes it worse — by 21
+points.** TitaNet given the correct speaker count scores 53.9 %; the same
+backend left to guess finds *ten* speakers, six of them wrong, and scores
+32.4 %. This is the opposite of the obvious assumption, and it is the
+strongest argument for treating "what the caller knows" as a parameter to be
+searched rather than a fact to be passed through.
+
+The mechanism is visible in the DER split. Forced to four clusters, TitaNet
+must place every window in one of them, so overlapped and ambiguous speech is
+merged into confident wrong assignments and each stream is contaminated.
+Left free, it over-segments; four clusters carry most of the words cleanly
+and the six spurious ones cost only their own content as insertions.
+**Cluster purity beats cluster count when the metric is cpWER** — being
+fragmented is recoverable, being merged is not.
+
+**Near-perfect diarisation still costs about four points of word accuracy.**
+The same ASR model on the undiarised mix scores 16.7 % WER against the
+pipeline's 20.6 % cpWER, at DER 0.5 % — so the loss is not the diarizer
+getting speakers wrong. It is that overlapped regions hand both speakers the
+same mixed audio, boundary errors clip word edges, and concatenating
+non-adjacent speech removes context. For `whisper-large-v3` the gap is wider
+still: 12.2 % flat against 18.6 % attributed, +6.4 points.
+
+That trade has no equivalent in either half's own table, and it is the number
+a deployment actually pays: **attribution is not free, and the bill is
+roughly a quarter of your word accuracy.** Whether that is worth it depends
+entirely on whether anyone needs to know who said what — which is exactly the
+choice this repo exists to inform.
+
+The end-to-end models win here by a wide margin, and the ordering of the ASR
+models under the pipeline matches their ordering on overlapped audio in the
+flat benchmark: `whisper-large-v3` degrades most gracefully when a second
+voice cuts in, and that survives being wrapped in a pipeline.
+
 A full 8-model matrix on a 90-second session takes roughly 10 minutes. Longer sessions scale linearly — plan accordingly.
 
 ## Repo layout
@@ -668,9 +768,10 @@ A full 8-model matrix on a 90-second session takes roughly 10 minutes. Longer se
 | `degrade.py` | degradation profiles (noise, codec, reverb, clipping) |
 | `bench.py` | runs the model × channel matrix, scores against the reference |
 | `diarize.py` | speaker diarisation backends, scored as DER |
-| `score.py` | normalisation + WER/CER alignment + DER |
+| `score.py` | normalisation + WER/CER alignment + DER + cpWER |
 | `test_score.py` | regression tests for the normalisation rules |
 | `rescore.py` | re-scores stored transcripts after a `score.py` change, no model runs |
+| `pipeline.py` | diarise → transcribe per speaker → cpWER, as one configurable pipeline |
 | `compare.py` | run directory → Markdown report |
 | `audio_io.py` | shared decode/encode helpers (ffmpeg + libsndfile) |
 | `envfile.py` | loads `.env` before torch/NeMo import, so caches land where you asked |
