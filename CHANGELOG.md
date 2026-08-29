@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`conversations/accent-en.yaml` — an accent axis, with its limits stated.** The `allhands-en` conversation unchanged, except three of the six speakers are voiced by *German* Piper models reading English text: a German VITS voice phonetises English with German grapheme-to-phoneme rules, landing the substitutions roughly where an L2 German speaker puts them. Because the reference, timing and overlap are identical and both groups share one recording and one diarisation, the comparison is **within-session** — nothing differs but the voice.
+
+  Native speakers score **11.2 %** cpWER, German-voiced speakers **78.1 %**. Seven times worse from the voice alone; the session goes 12.4 % → 49.6 % cpWER and the undiarised baseline 5.6 % → 38.9 % WER. The failure is legibly phonetic (`through` → `truk`, `the` → `be`, `walk` → `valk`), and the stream then truncates — the model does not merely mis-hear the accent, it gives up on it.
+
+  **Diarisation was almost untouched** (DER 11.4 % vs 8.0 %, every speaker still its own cluster). Accent damages *what was said*, not *who said it*, so the two halves of the pipeline fail on different things.
+
+  The proxy overshoots and is documented as doing so: a German TTS model has never seen English, so it applies German phonology unconditionally where a real L2 speaker applies it partially, and it carries none of the prosody or disfluency. The number is an **upper bound on accent difficulty**, not a model of a mild accent. Measuring that needs recorded L2 speech.
+
 - **`fuse.py` — multi-model voting and selective escalation, measured and found marginal.** `--fusion rover` runs several ASR models per speaker stream and votes word by word; `--fusion escalate` runs two and sends only the speakers where they *disagree* to a third, using inter-model disagreement as a confidence signal that needs no reference and therefore works on real audio.
 
   Both work. Neither is worth much. Three models buy **0.3 points in English and 0.9 in German for two to three times the compute**, while on the same German session choosing TitaNet over Sortformer is worth 25.7 points. The diarizer is worth about thirty times what the ASR ensemble is worth.

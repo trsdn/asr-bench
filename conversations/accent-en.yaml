@@ -1,0 +1,197 @@
+name: accent-en
+language: en
+notes: >
+  Accent proxy: the `allhands-en` conversation, unchanged, but three of the
+  six speakers are voiced by *German* Piper models reading English text.
+
+  This is a proxy and must be read as one. A German VITS voice given English
+  text phonetises it with German grapheme-to-phoneme rules, which produces
+  systematic vowel and consonant substitutions in roughly the places an L2
+  German speaker of English makes them. It does not reproduce L2 prosody,
+  hesitation, or the syntactic transfer that a real second-language speaker
+  brings, and it is more uniform than any human accent. What it does give is
+  a *controlled* accent axis: the words, the timing, the overlap and the
+  reference are byte-identical to `allhands-en`, so any difference in the
+  result is attributable to the voice and nothing else.
+
+  The design point is the within-session contrast. Speakers a, c and e keep
+  their native English voices; b, d and f are German. cpWER is reported per
+  speaker, so native and accented speakers are compared inside one recording,
+  under one diarisation, with one ASR model -- which removes every confound
+  that a session-level comparison against `allhands-en` would carry.
+
+speakers:
+  - id: a
+    name: Priya
+    gender: f
+    rate: 195
+    voice: en_US-lessac-high  # native English
+  - id: b
+    name: Callum
+    gender: m
+    rate: 180
+    voice: de_DE-thorsten-medium  # German voice reading English
+  - id: c
+    name: Ines
+    gender: f
+    rate: 205
+    voice: en_US-amy-medium  # native English
+  - id: d
+    name: Aaron
+    gender: m
+    rate: 172
+    voice: de_DE-karlsson-low  # German voice reading English
+  - id: e
+    name: Beth
+    gender: f
+    rate: 200
+    voice: en_GB-cori-high  # native English
+  - id: f
+    name: Daniel
+    gender: m
+    rate: 185
+    voice: de_DE-pavoque-low  # German voice reading English
+
+turns:
+  - speaker: a
+    text: "Right, everyone's here, let's get started."
+  - speaker: a
+    text: "First item is the outage from last night, that's incident three seven, dash, one four."
+    gap: 0.3
+
+  - speaker: b
+    text: "I can walk through it quickly."
+    gap: 0.2
+  - speaker: b
+    text: "At two nineteen the primary queue stopped draining and nothing alerted for eleven minutes."
+    gap: 0.25
+
+  # c interrupts before b finishes
+  - speaker: c
+    text: "Eleven minutes? I thought the threshold was five."
+    gap: -0.5
+
+  - speaker: b
+    text: "It is five, but the alert fires on queue depth, and depth looked normal because nothing was arriving either."
+    gap: 0.15
+
+  - speaker: d
+    text: "So we were blind to it by design."
+    gap: 0.2
+
+  - speaker: b
+    text: "Effectively, yes."
+    gap: 0.15
+
+  # two people answer simultaneously
+  - speaker: e
+    text: "We should alert on throughput, not depth."
+    gap: -0.7
+  - speaker: f
+    text: "Throughput alone will page us every deploy."
+    gap: -0.9
+
+  - speaker: a
+    text: "One at a time, please."
+    gap: 0.3
+
+  - speaker: e
+    text: "My point is depth can't distinguish healthy and dead, and throughput can."
+    gap: 0.25
+
+  - speaker: f
+    text: "And my point is we already tried that in March and turned it off after four days of noise."
+    gap: 0.2
+
+  - speaker: c
+    text: "I remember that."
+    gap: 0.15
+
+  - speaker: d
+    text: "Could we alert on both, and only page when both are abnormal?"
+    gap: 0.2
+
+  - speaker: b
+    text: "That would have caught last night."
+    gap: 0.15
+
+  - speaker: a
+    text: "Let's cost that before we commit to it."
+    gap: 0.25
+  - speaker: a
+    text: "Second item, and I need a decision today: the storage migration."
+    gap: 0.25
+
+  - speaker: f
+    text: "I'd rather we didn't start that this quarter."
+    gap: 0.2
+
+  - speaker: c
+    text: "We've been saying that for three quarters."
+    gap: -0.5
+
+  - speaker: f
+    text: "Because every quarter something like last night happens."
+    gap: 0.2
+
+  - speaker: e
+    text: "How much is it actually costing us to wait?"
+    gap: 0.2
+
+  - speaker: d
+    text: "About eleven hundred a month in duplicated storage, and roughly two days of engineering time."
+    gap: 0.2
+
+  - speaker: a
+    text: "Per month?"
+    gap: 0.15
+
+  - speaker: d
+    text: "Per month."
+    gap: 0.15
+
+  - speaker: c
+    text: "Then waiting is the expensive option, not the safe one."
+    gap: 0.2
+
+  - speaker: b
+    text: "Agreed, but I'd want a rollback path written down before we move anything."
+    gap: 0.2
+
+  - speaker: a
+    text: "That's reasonable."
+    gap: 0.2
+  - speaker: a
+    text: "Callum writes the rollback, Beth and Daniel scope the alerting change, Ines owns the migration plan."
+    gap: 0.25
+
+  - speaker: e
+    text: "What's the deadline?"
+    gap: 0.2
+
+  - speaker: a
+    text: "End of next week, so we can review it on the twenty second."
+    gap: 0.2
+
+  - speaker: f
+    text: "I'll need access to the staging cluster for that."
+    gap: 0.2
+
+  - speaker: b
+    text: "I'll send you the credentials after this."
+    gap: 0.15
+
+  - speaker: c
+    text: "One more thing before we close."
+    gap: 0.2
+  - speaker: c
+    text: "The customer on account nine nine four, dash, six zero eight is still waiting on an answer from us."
+    gap: 0.2
+
+  - speaker: a
+    text: "I'll take that one."
+    gap: 0.15
+
+  - speaker: a
+    text: "Good, that's everything, thanks all."
+    gap: 0.3

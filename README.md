@@ -939,7 +939,57 @@ unchanged. **Fusion needs three voters to do anything at all.** Paying for a
 second model buys nothing unless you also pay for a third, or use the second
 only as an escalation trigger — which is what `escalate` does.
 
+### An accent axis, and the limits of faking one
+
+`conversations/accent-en.yaml` is the `allhands-en` conversation with the same
+words, the same timing and the same overlap, except three of the six speakers
+are voiced by *German* Piper models reading English text. A German VITS voice
+phonetises English with German grapheme-to-phoneme rules, which lands the
+substitutions roughly where an L2 German speaker puts them.
+
+Because the reference is identical and both groups share one recording, one
+diarisation and one ASR model, the comparison is **within-session**: nothing
+differs between the two groups except the voice.
+
+| Speakers | cpWER |
+|---|---:|
+| a, c, e — native English voices | **11.2 %** |
+| b, d, f — German voices reading English | **78.1 %** |
+
+**Seven times worse, from the voice alone.** The whole session goes from
+12.4 % to 49.6 % cpWER, and the undiarised baseline from 5.6 % to 38.9 % WER.
+The failure is phonetic and completely legible:
+
+```
+REF  I can walk through it quickly. At two nineteen the primary queue
+     stopped draining and nothing alerted for eleven minutes.
+HYP  E canvalk truk it quickly. At twoninitin, be primachi quay stoppet
+     draining and noting alatet for eleven mining eleven.
+```
+
+`through` → `truk`, `the` → `be`, `nothing alerted` → `noting alatet`,
+`walk` → `valk`: the *th*, *w* and vowel substitutions German speakers
+actually make. The stream then truncates, so the model does not merely
+mis-hear the accent, it gives up on it.
+
+**Diarisation was almost untouched.** DER 11.4 % against 8.0 % on the native
+session, and every one of the six speakers still got its own cluster. Accent
+damages *what was said*, not *who said it* — the two halves of the pipeline
+fail on different things, which is an argument for choosing them separately.
+
+**The proxy overshoots, and that has to be stated.** 78 % is not a light
+accent. A German TTS model has never been trained on English, so it applies
+German phonology unconditionally, where a real L2 speaker applies it
+partially and inconsistently and carries prosody and disfluency this cannot
+reproduce. Read the result as an **upper bound on accent difficulty**, not as
+a model of an accented speaker. It answers "does an accent axis move the
+numbers, and does it move diarisation or transcription?" — decisively, both
+questions — and it does not answer "how much does a mild accent cost". That
+needs recorded L2 speech, which is the honest version of
+[#12](../../issues/12).
+
 ### Where the search harness was wrong about itself
+
 The first run of `search.py` used successive halving, and it produced a
 confident, wrong answer. Round one ran all 18 configs on the four-speaker
 session and eliminated every TitaNet configuration — correctly, TitaNet is the
