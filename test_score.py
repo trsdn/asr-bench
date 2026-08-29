@@ -9,6 +9,7 @@ Runs without pytest — `python test_score.py` — because the repo has no
 test dependency and scoring must stay usable without one.
 """
 
+import cleanup
 import fuse
 import score
 
@@ -106,6 +107,62 @@ AGREEMENT_CASES = [
 ]
 
 
+# The cleanup guard. Half of these must be *accepted*: a guard that vetoes
+# everything is trivially safe and useless, so the tests pin the permissive
+# side as hard as the restrictive one.
+GUARD_CASES = [
+    ("punctuation and casing only",
+     "der deployment lief durch die latenz liegt bei 120 millisekunden",
+     "Der Deployment lief durch. Die Latenz liegt bei 120 Millisekunden.",
+     "de", True),
+    ("spoken number rewritten to digits",
+     "Ticket vier null neun strich zwei eins ist noch offen",
+     "Ticket 409-21 ist noch offen.",
+     "de", True),
+    ("digits rewritten to words",
+     "wir sind bei Version 2.4.1",
+     "Wir sind bei Version zwei Punkt vier Punkt eins.",
+     "de", True),
+    ("filler words removed",
+     "also ähm ich glaube ähm das passt so",
+     "Ich glaube, das passt so.",
+     "de", True),
+    ("acronym capitalised",
+     "das api gateway war kurz weg",
+     "Das API Gateway war kurz weg.",
+     "en", True),
+    ("digit changed",
+     "Ticket vier null neun strich zwei eins ist offen",
+     "Ticket 409-12 ist offen.",
+     "de", False),
+    ("version truncated",
+     "wir sind bei Version 2.4.1",
+     "Wir sind bei Version 2.4.",
+     "de", False),
+    ("number invented",
+     "die Latenz ist gestiegen",
+     "Die Latenz ist um 30 Prozent gestiegen.",
+     "de", False),
+    ("number dropped",
+     "die Latenz liegt bei 120 Millisekunden",
+     "Die Latenz ist hoch.",
+     "de", False),
+    ("identifier mangled",
+     "wir migrieren auf postgres16 nächste Woche",
+     "Wir migrieren auf Postgres nächste Woche.",
+     "de", False),
+    ("summarised instead of cleaned",
+     "also ich habe gestern das deployment durchgezogen und danach noch die "
+     "logs geprüft und da war alles ruhig soweit ich das sehen konnte",
+     "Deployment erledigt, Logs unauffällig.",
+     "de", False),
+    ("empty output",
+     "die Latenz ist hoch",
+     "",
+     "de", False),
+]
+
+
 def main() -> int:
     failures = 0
     for hyp, ref, lang, expected in CASES:
@@ -141,8 +198,23 @@ def main() -> int:
         print(f"{'ok  ' if ok else 'FAIL'} [fuse] agreement {name:32s} -> {got:.3f}"
               + ("" if ok else f" expected {expected:.3f}"))
 
+    print()
+    for name, raw, cleaned, lang, expected in GUARD_CASES:
+        if cleaned.strip():
+            got = cleanup.verdict(raw, cleaned, lang).ok
+            why = cleanup.verdict(raw, cleaned, lang).reason
+        else:
+            got = cleanup.clean(cleaned or raw, lambda t, l: "", lang)[2].ok
+            why = "empty"
+        ok = got == expected
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} [guard] {name:36s} "
+              f"{'accept' if got else 'veto'}"
+              + ("" if ok else f" expected {'accept' if expected else 'veto'}")
+              + ("" if got else f"  ({why})"))
+
     total = (len(CASES) + len(CP_CASES) + len(FUSE_CASES)
-             + len(AGREEMENT_CASES))
+             + len(AGREEMENT_CASES) + len(GUARD_CASES))
     print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 

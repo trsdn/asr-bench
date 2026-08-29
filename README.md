@@ -1045,6 +1045,84 @@ above are the kind that appear non-linearly — a repetition loop needs an
 unlucky window, drift needs time. This rules out the pessimistic assumption
 at five minutes; it does not clear the hour mark.
 
+### The LLM cleanup makes the transcript worse, and the guard proves how much worse
+
+The last step of the pipeline is the obvious one: hand the transcript to a
+language model to fix punctuation, casing and obvious recognition errors.
+`cleanup.py` does that, and it does not trust the result. The model
+proposes; a reference-free guard decides whether the proposal may be
+accepted.
+
+The guard exists because the failure mode is specific. A cleanup model
+writes fluently, so its mistakes are fluent too, and a transcript that says
+the wrong ticket number confidently is worse than one that says nothing —
+it will be believed. So the guard checks numbers as a **digit signature**
+(`vier null neun strich zwei eins` and `409-21` both reduce to `40921`, so
+rewriting the notation is allowed and changing the value is not),
+identifiers and acronyms as tokens, and the surrounding prose against a
+similarity floor that catches the model summarising instead of tidying.
+
+Because every proposal is kept even when rejected, both the guarded and the
+unguarded transcript can be scored from one generation:
+
+| | `allhands-de` | `allhands-en` |
+|---|---:|---:|
+| raw pipeline | **21.5 %** | **12.4 %** |
+| cleaned, guarded | 28.7 % | 22.4 % |
+| cleaned, unguarded | 51.3 % | 32.1 % |
+| proposals accepted | 2 of 6 | 7 of 9 |
+
+Two things at once. **The guard works** — it prevented 22.6 points of damage
+in German and 9.7 in English, and every veto it issued was correct on
+inspection. It caught the model *reordering* the digits of a whole segment
+(`409211824` → `182440921`), dropping a digit from a phone number, and
+replacing two segments with a summary. And **cleanup is still net negative**,
+by 7.2 points in German and 10.0 in English. A guard can stop the worst
+output; it cannot make a bad cleanup good.
+
+The interesting part is what the *accepted* proposals did:
+
+```
+RAW  In Stadion zelt aber nicht ... Dann bräuchte ich noch die Loks
+     von gestern Nacht.
+OUT  In einem Stadion zelt nicht ... Dann brauche ich noch die
+     Lokalitäten von gestern Nacht.
+```
+
+The reference says *Logs*. The ASR heard *Loks* — wrong, but visibly wrong,
+and a reader skims past it or goes back to the audio. The cleanup turned it
+into *Lokalitäten*: fluent, grammatical, and further from the truth. In the
+other accepted segment it did the same to *Inzidenten*, promoting it to
+*identitären*, and silently deleted the first and last sentence.
+
+That is the finding worth keeping. **A cleanup model repairs fluency, not
+truth. Where the ASR was already wrong it makes the error more plausible
+rather than less**, and plausible errors are more expensive than visible
+ones, because visible garbage is a signal to go and listen.
+
+**A caveat that cuts the other way.** cpWER scores against a *verbatim*
+reference, and a cleanup's job includes changing words — removing fillers,
+fixing grammar. Some of the penalty above is the metric refusing to credit
+work that a human would want done. That is a real objection, and it does not
+rescue the result: dropping whole sentences and inventing `für eine neue
+Testphase` is not a metric artefact. But it does mean the correct evaluation
+of a cleanup step is not WER at all. It is entity preservation plus
+readability — and entity preservation is exactly what the guard already
+measures, reference-free, on any transcript.
+
+So the usable output of this section is not the cleanup. It is the veto
+rate: **4 of 6 German proposals and 2 of 9 English ones broke something
+checkable**, measured without a reference, on a model small enough to run
+locally. That number is available in production, where cpWER never is.
+
+Scale is the obvious objection and it is untested here: this ran
+`Qwen2.5-1.5B-Instruct`, chosen as the smallest thing that could plausibly
+do the job, precisely so that a positive result would have been cheap. It
+was not positive. Whether a 7B or 14B model crosses over is
+[#20](../../issues/20). Phi-4-multimodal, already cached for the audio
+benchmark, could not be used at all: it attaches its adapters through
+`peft`, which reaches for a `transformers` method that 4.57 removed.
+
 ### Where the search harness was wrong about itself
 
 The first run of `search.py` used successive halving, and it produced a
@@ -1082,6 +1160,7 @@ condition-matched.
 | `pipeline.py` | diarise → transcribe per speaker → cpWER, as one configurable pipeline |
 | `search.py` | sweeps the pipeline config space, best overall and best per condition, held-out validated |
 | `fuse.py` | ROVER voting over several ASR hypotheses + the reference-free agreement signal |
+| `cleanup.py` | LLM transcript cleanup with a guard that vetoes it when numbers or identifiers move |
 | `compare.py` | run directory → Markdown report |
 | `audio_io.py` | shared decode/encode helpers (ffmpeg + libsndfile) |
 | `envfile.py` | loads `.env` before torch/NeMo import, so caches land where you asked |
