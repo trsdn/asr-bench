@@ -1,0 +1,322 @@
+name: longform-de
+language: de
+notes: >
+  Eine lange Session, in der die Dauer die einzige geänderte Variable ist.
+
+  Alle bisherigen Sessions dauern ein bis zwei Minuten. Echte Meetings
+  dauern dreißig bis sechzig. Ob die gemessenen Ergebnisse überhaupt
+  übertragbar sind, hängt daran, ob Fehler mit der Laufzeit wachsen —
+  und dafür gibt es drei konkrete Mechanismen: Whisper dekodiert in
+  Dreißig-Sekunden-Fenstern und kann in Wiederholungsschleifen laufen,
+  Clustering-Diarisation driftet, wenn eine Stimme später anders klingt
+  als am Anfang, und ein einmal falsch angelegter Cluster verunreinigt
+  alles, was danach kommt.
+
+  Der Aufbau hält deshalb alles außer der Länge fest: exakt dieselben
+  sechs Sprecher wie in allhands-de, dieselben Stimmen, dieselben Raten.
+  Die letzten einundvierzig Turns SIND allhands-de, unverändert. Davor
+  stehen zwei weitere Themenblöcke mit völlig anderem Text, auf
+  dieselben sechs Sprecher verteilt. Damit ist ein direkter Vergleich
+  möglich: dasselbe Material einmal allein und einmal am Ende einer
+  mehr als doppelt so langen Aufnahme. Steigt der cpWER des dritten
+  Blocks gegenüber der eigenständigen Session, ist das Laufzeitdrift
+  und nichts anderes.
+
+  Bewusst enthalten sind Themenwechsel mit längeren Pausen, weil genau
+  dort ein Modell den Kontext verliert und eine Diarisation dazu neigt,
+  eine bekannte Stimme als neue zu behandeln.
+
+  Ehrliche Einschränkung: viereinhalb Minuten sind noch keine dreißig.
+  Das ist die Richtung, nicht das Ziel.
+
+speakers:
+- id: a
+  name: Katrin
+  gender: f
+  rate: 190
+- id: b
+  name: Marek
+  gender: m
+  rate: 175
+- id: c
+  name: Yasemin
+  gender: f
+  rate: 205
+- id: d
+  name: Holger
+  gender: m
+  rate: 170
+- id: e
+  name: Pia
+  gender: f
+  rate: 198
+- id: f
+  name: Stefan
+  gender: m
+  rate: 182
+turns:
+- speaker: a
+  text: Guten Morgen zusammen, dann fangen wir mal an mit dem Standup.
+- speaker: a
+  text: Markus, magst du anfangen?
+  gap: 0.3
+- speaker: b
+  text: Klar. Ich habe gestern das Deployment auf Version zwei Punkt vier Punkt eins durchgezogen.
+  gap: 0.5
+- speaker: b
+  text: Die Latenz im Backend liegt jetzt bei ungefähr hundertzwanzig Millisekunden im Durchschnitt.
+- speaker: b
+  text: Heute schaue ich mir den Caching-Layer an, da haben wir noch eine Race Condition.
+- speaker: a
+  text: Ist das der Bug aus Ticket dreitausendsiebenhundertzwölf?
+  gap: 0.25
+- speaker: b
+  text: Genau der. Ich glaube das Problem sitzt im Retry-Handling.
+  gap: 0.4
+- speaker: c
+  text: Kurzer Einwurf dazu.
+  gap: -0.35
+- speaker: c
+  text: Wir hatten den gleichen Effekt letzte Woche im Staging, das lag an der Zeitzone.
+  gap: 0.3
+- speaker: b
+  text: Okay, das schaue ich mir an. Danke Petra.
+- speaker: a
+  text: Petra, wie sieht es bei dir aus?
+  gap: 0.5
+- speaker: c
+  text: Ich bin fast durch mit dem Reporting-Dashboard.
+  gap: 0.35
+- speaker: c
+  text: Die Aggregation über die letzten neunzig Tage dauert allerdings noch zu lange, gut acht Sekunden.
+- speaker: c
+  text: Ich würde da gerne einen Index auf die Session-Tabelle legen.
+- speaker: a
+  text: Klingt sinnvoll. Sprich das aber bitte kurz mit Yannick ab, der hat da letztens etwas umgebaut.
+  gap: 0.45
+- speaker: c
+  text: Mache ich, ich schreibe ihm nachher im Chat.
+  gap: 0.3
+- speaker: a
+  text: 'Von meiner Seite: ich sitze weiter an der Migration von Postgres vierzehn auf sechzehn.'
+  gap: 0.6
+- speaker: a
+  text: Das Rollback-Skript steht, getestet ist es aber noch nicht vollständig.
+- speaker: b
+  text: Brauchst du dafür ein Wartungsfenster?
+  gap: 0.3
+- speaker: a
+  text: Ja, ich würde Donnerstagabend ab neunzehn Uhr vorschlagen.
+  gap: 0.35
+- speaker: c
+  text: Donnerstag passt mir.
+  gap: -0.2
+- speaker: b
+  text: Von mir aus auch, ich bin dann als Backup da.
+  gap: 0.4
+- speaker: a
+  text: Perfekt, dann trage ich das ein. Damit sind wir durch, danke euch.
+  gap: 0.5
+- speaker: d
+  text: Also, wir müssen heute wirklich eine Entscheidung zum Deployment treffen.
+  gap: 1.2
+- speaker: d
+  text: Tobias, du hattest ja Bedenken wegen der Datenbank-Migration.
+  gap: 0.3
+- speaker: e
+  text: Ja, genau, und zwar erhebliche Bedenken.
+  gap: -0.6
+- speaker: e
+  text: Wenn wir das Schema ändern während die alten Worker noch laufen, dann haben wir ein Problem.
+  gap: 0.2
+- speaker: f
+  text: Moment, das stimmt so nicht.
+  gap: -0.9
+- speaker: f
+  text: Die Worker lesen doch gar nicht direkt aus der Tabelle, die gehen über die API.
+  gap: 0.15
+- speaker: e
+  text: Nicht alle, der Batch-Job nicht.
+  gap: -0.5
+- speaker: a
+  text: Der Batch-Job liest direkt, das ist richtig.
+  gap: -1.1
+- speaker: d
+  text: Okay, einen nach dem anderen bitte.
+  gap: 0.4
+- speaker: d
+  text: Jonas, du sagst der Batch-Job liest direkt?
+  gap: 0.2
+- speaker: a
+  text: Ja, aus historischen Gründen.
+  gap: 0.3
+- speaker: a
+  text: Der wurde nie auf die API umgestellt, weil die Performance nicht gereicht hat.
+  gap: 0.1
+- speaker: f
+  text: Das wusste ich nicht.
+  gap: -0.45
+- speaker: e
+  text: Das meinte ich ja die ganze Zeit.
+  gap: -0.7
+- speaker: d
+  text: Gut, dann brauchen wir für den Batch-Job ein Wartungsfenster.
+  gap: 0.5
+- speaker: e
+  text: Oder wir stellen ihn endlich auf die API um.
+  gap: -0.55
+- speaker: f
+  text: Das dauert mindestens zwei Sprints.
+  gap: -0.8
+- speaker: a
+  text: Eher drei, mit dem Testen.
+  gap: -0.65
+- speaker: d
+  text: Also Wartungsfenster.
+  gap: 0.35
+- speaker: d
+  text: Ich schlage Samstag früh um sechs Uhr vor, da ist die Last am niedrigsten.
+  gap: 0.2
+- speaker: a
+  text: Samstag um sechs bin ich nicht da.
+  gap: -0.4
+- speaker: f
+  text: Ich könnte übernehmen, ich bin sowieso wach.
+  gap: 0.25
+- speaker: e
+  text: Dann machen wir es so, aber wir brauchen vorher einen sauberen Rollback-Plan.
+  gap: 0.3
+- speaker: d
+  text: Einverstanden. Sabine, schreibst du den Plan bis Donnerstag?
+  gap: 0.25
+- speaker: f
+  text: Mache ich.
+  gap: 0.2
+- speaker: d
+  text: Perfekt, dann sind wir durch.
+  gap: 0.4
+- speaker: a
+  text: Guten Morgen zusammen, wir sind vollzählig, dann fangen wir an.
+  gap: 1.2
+- speaker: a
+  text: Erster Punkt ist der Vorfall von gestern Nacht, Ticket vier null neun, Strich, zwei eins.
+  gap: 0.3
+- speaker: b
+  text: Ich kann das kurz zusammenfassen.
+  gap: 0.2
+- speaker: b
+  text: Um zwei Uhr dreiundzwanzig ist der Load Balancer ausgefallen, und zwar komplett.
+  gap: 0.25
+- speaker: c
+  text: Moment, komplett oder nur die eine Region?
+  gap: -0.5
+- speaker: b
+  text: Nur eu-west, aber der Failover hat nicht gegriffen.
+  gap: 0.15
+- speaker: d
+  text: Das ist der Punkt, der mich beunruhigt.
+  gap: 0.2
+- speaker: d
+  text: Wir haben das Failover seit dem Deployment im Juni nicht mehr getestet.
+  gap: 0.2
+- speaker: e
+  text: Doch, im August, ich hatte das im Staging durchgespielt.
+  gap: -0.7
+- speaker: f
+  text: Im Staging zählt aber nicht, das ist eine andere Konfiguration.
+  gap: -0.9
+- speaker: a
+  text: Einer nach dem anderen, bitte.
+  gap: 0.3
+- speaker: e
+  text: 'Kurz nur: im Staging lief es sauber durch, dreiunddreißig Sekunden bis zum Umschalten.'
+  gap: 0.25
+- speaker: f
+  text: Und in Produktion sind es hundertachtzig Sekunden, das ist der ganze Unterschied.
+  gap: 0.2
+- speaker: c
+  text: Genau.
+  gap: 0.15
+- speaker: b
+  text: Ich würde vorschlagen, wir ziehen das Timeout runter und testen es im Rahmen des nächsten Wartungsfensters.
+  gap: 0.3
+- speaker: d
+  text: Wann ist das Fenster?
+  gap: 0.2
+- speaker: a
+  text: Am achtzehnten, zwischen zwei und vier Uhr morgens.
+  gap: 0.2
+- speaker: c
+  text: Da bin ich nicht da.
+  gap: 0.15
+- speaker: c
+  text: Kann jemand anderes das Monitoring übernehmen?
+  gap: 0.2
+- speaker: e
+  text: Ich mache das.
+  gap: 0.15
+- speaker: f
+  text: Ich hänge mich mit rein, dann sind wir zu zweit.
+  gap: -0.4
+- speaker: a
+  text: Gut, dann ist das gesetzt.
+  gap: 0.3
+- speaker: a
+  text: 'Zweiter Punkt, und da brauche ich eine Entscheidung: das Caching-Layer.'
+  gap: 0.25
+- speaker: d
+  text: Ich bin dagegen, das jetzt anzufassen.
+  gap: 0.2
+- speaker: b
+  text: Warum denn, die Latenz ist seit Wochen bei ungefähr vierhundert Millisekunden.
+  gap: -0.5
+- speaker: d
+  text: Weil wir mitten in einem Incident-Nachgang stecken und nicht zwei Baustellen gleichzeitig aufmachen
+    sollten.
+  gap: 0.2
+- speaker: c
+  text: Da ist was dran.
+  gap: 0.15
+- speaker: e
+  text: Andererseits ist die Latenz genau der Grund, warum der Support so viele Tickets bekommt.
+  gap: 0.2
+- speaker: f
+  text: Wie viele denn konkret?
+  gap: 0.2
+- speaker: e
+  text: Letzte Woche siebenundzwanzig, davon neunzehn mit Timeout im Betreff.
+  gap: 0.2
+- speaker: a
+  text: Okay, das ist ein Argument.
+  gap: 0.25
+- speaker: a
+  text: 'Ich schlage vor, wir machen einen Zeitplan: Failover diese Woche, Caching nächste.'
+  gap: 0.25
+- speaker: b
+  text: Damit kann ich leben.
+  gap: 0.2
+- speaker: d
+  text: Ich auch, wenn wir das Rollback vorher schreiben.
+  gap: -0.3
+- speaker: a
+  text: Einverstanden.
+  gap: 0.2
+- speaker: a
+  text: Marek schreibt das Rollback, Pia und Stefan machen das Wartungsfenster, Yasemin dokumentiert den
+    Vorfall.
+  gap: 0.25
+- speaker: c
+  text: Bis wann?
+  gap: 0.2
+- speaker: a
+  text: Bis Freitag, damit wir es im nächsten Review haben.
+  gap: 0.2
+- speaker: f
+  text: Dann bräuchte ich noch die Logs von gestern Nacht.
+  gap: 0.2
+- speaker: b
+  text: Schicke ich dir gleich nach dem Meeting.
+  gap: 0.15
+- speaker: a
+  text: Gut, dann sind wir durch, danke euch.
+  gap: 0.3

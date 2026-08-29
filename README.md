@@ -144,7 +144,7 @@ cp .env.example .env
 
 ## 1. Write a conversation
 
-A script is a YAML file listing speakers and turns. See [`conversations/standup-de.yaml`](conversations/standup-de.yaml) (German, 3 speakers), [`conversations/support-call-en.yaml`](conversations/support-call-en.yaml) (English, 2 speakers), [`conversations/crosstalk-de.yaml`](conversations/crosstalk-de.yaml) (German, 4 speakers, 9.3 % overlapping speech) and [`conversations/crosstalk-en.yaml`](conversations/crosstalk-en.yaml) (English, 4 speakers, ~8.5 % overlap).
+A script is a YAML file listing speakers and turns. See [`conversations/standup-de.yaml`](conversations/standup-de.yaml) (German, 3 speakers), [`conversations/support-call-en.yaml`](conversations/support-call-en.yaml) (English, 2 speakers), [`conversations/crosstalk-de.yaml`](conversations/crosstalk-de.yaml) (German, 4 speakers, 9.3 % overlapping speech) and [`conversations/crosstalk-en.yaml`](conversations/crosstalk-en.yaml) (English, 4 speakers, ~8.5 % overlap). Larger and harder scripts: [`conversations/allhands-de.yaml`](conversations/allhands-de.yaml) and [`conversations/allhands-en.yaml`](conversations/allhands-en.yaml) (6 speakers, past the end-to-end diarizers' 4-speaker ceiling), [`conversations/accent-en.yaml`](conversations/accent-en.yaml) (6 speakers, three of them voiced by German models reading English) and [`conversations/longform-de.yaml`](conversations/longform-de.yaml) (4.6 minutes, 6 speakers, with `allhands-de` embedded unchanged as its final segment so length can be isolated).
 
 ```yaml
 name: standup-de
@@ -987,6 +987,63 @@ numbers, and does it move diarisation or transcription?" — decisively, both
 questions — and it does not answer "how much does a mild accent cost". That
 needs recorded L2 speech, which is the honest version of
 [#12](../../issues/12).
+
+### Length is not the problem it was assumed to be
+
+Every session in this repo lasts one to two minutes. Real meetings last
+thirty to sixty, and there are three concrete reasons to expect the results
+not to survive that: Whisper decodes in thirty-second windows and can fall
+into repetition loops, clustering diarisation drifts when a voice sounds
+different late in a recording than at the start, and one cluster assigned
+wrongly contaminates everything after it.
+
+`longform-de` tests this while holding everything else fixed. It is 4.6
+minutes with the **same six speakers, voices and rates** as `allhands-de`,
+and its last forty-one turns *are* `allhands-de`, unchanged. The same
+material is therefore measured twice: once on its own, and once at the end
+of a recording more than twice as long. Anything that moves is runtime
+effect and nothing else.
+
+Nothing moved.
+
+| | `allhands-de` alone | inside `longform-de` |
+|---|---:|---:|
+| flat WER of that material | 23.3 % | **21.5 %** |
+| whole-session cpWER | 21.5 % | **18.7 %** |
+| DER | 6.1 % | **6.5 %** |
+| speakers found | 6 of 6 | 6 of 6 |
+
+The identical text scored *slightly better* at 153–275 s than it did as a
+standalone two-minute file, and diarisation did not drift by any amount worth
+reporting. There were no repetition loops.
+
+Splitting the long session at its three content boundaries shows where the
+errors actually live:
+
+| segment | position | words | WER |
+|---|---|---:|---:|
+| standup material | 0.8–86 s | 224 | 16.5 % |
+| crosstalk material | 88–152 s | 204 | **27.9 %** |
+| allhands material | 153–275 s | 335 | 21.5 % |
+
+The worst block is in the **middle**, not at the end, and it is the block
+built to be dense with overlapping speech. Error rate tracks what is being
+said, not how long the recording has been running. That is a useful negative
+result: it means the two-minute sessions elsewhere in this repo are not
+silently optimistic, and it puts overlap density back at the top of the list
+of things that actually cost accuracy.
+
+Two secondary observations. The attribution bill nearly vanished — the
+pipeline cost **+0.4 points** over its undiarised baseline here against the
+usual +6.4, because more speech per speaker gives a clustering diarizer more
+to work with, so length *helps* the part of the system that was expected to
+degrade first. And diarisation took 107 s against 62 s of ASR: on long audio
+the diarizer is the larger bill in wall clock as well as in accuracy.
+
+**What this does not show.** 4.6 minutes is not 30, and the failure modes
+above are the kind that appear non-linearly — a repetition loop needs an
+unlucky window, drift needs time. This rules out the pessimistic assumption
+at five minutes; it does not clear the hour mark.
 
 ### Where the search harness was wrong about itself
 

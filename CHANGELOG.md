@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`conversations/longform-de.yaml` — a length axis, controlled.** 4.6 minutes with the same six speakers, voices and rates as `allhands-de`, whose forty-one turns appear unchanged as the final segment. The same material is therefore scored twice: standalone, and at the end of a recording more than twice as long. Nothing else differs, so anything that moves is runtime effect.
+
+  Nothing moved. That material scores **21.5 %** flat WER inside the long session against 23.3 % standalone, whole-session cpWER is 18.7 % against 21.5 %, DER 6.5 % against 6.1 %, all six speakers found, and no repetition loops. Splitting at the content boundaries puts the worst block in the **middle** (27.9 %, the passage built dense with overlap) rather than at the end — error rate tracks what is said, not how long the recording has run.
+
+  Two side effects worth keeping: the attribution bill nearly vanished (**+0.4** points over the undiarised baseline against the usual +6.4, because more speech per speaker helps a clustering diarizer), and diarisation cost 107 s against 62 s of ASR, so on long audio the diarizer is the larger bill in wall clock too.
+
+  Caveat recorded in the README: this rules out degradation at five minutes, not at sixty. Loops and drift appear non-linearly.
+
 - **`conversations/accent-en.yaml` — an accent axis, with its limits stated.** The `allhands-en` conversation unchanged, except three of the six speakers are voiced by *German* Piper models reading English text: a German VITS voice phonetises English with German grapheme-to-phoneme rules, landing the substitutions roughly where an L2 German speaker puts them. Because the reference, timing and overlap are identical and both groups share one recording and one diarisation, the comparison is **within-session** — nothing differs but the voice.
 
   Native speakers score **11.2 %** cpWER, German-voiced speakers **78.1 %**. Seven times worse from the voice alone; the session goes 12.4 % → 49.6 % cpWER and the undiarised baseline 5.6 % → 38.9 % WER. The failure is legibly phonetic (`through` → `truk`, `the` → `be`, `walk` → `valk`), and the stream then truncates — the model does not merely mis-hear the accent, it gives up on it.
