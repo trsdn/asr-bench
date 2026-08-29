@@ -1,0 +1,190 @@
+name: allhands-en
+language: en
+notes: >
+  English six-speaker team meeting — deliberately two speakers past
+  Sortformer's hard ceiling of four.
+
+  The English counterpart to `allhands-de`, and an independent
+  conversation rather than a translation, so the two are two samples
+  instead of one measured twice. It exists because a six-speaker result
+  on German alone cannot separate "the model runs out of speaker slots"
+  from "the German voices are harder", and because Kokoro has English
+  voices but no German ones — the third TTS engine is only reachable
+  through an English script.
+
+  Contains the same stressors as its German counterpart: short
+  interjections that produce the sub-second fragments this repo's
+  diarisation sweep found to be the dominant failure mode, overlap at
+  turn boundaries, two people answering at once, spoken identifiers read
+  digit by digit, and quantities read as cardinals — the two number
+  readings that a scorer has to tell apart.
+
+speakers:
+  - id: a
+    name: Priya
+    gender: f
+    rate: 195
+  - id: b
+    name: Callum
+    gender: m
+    rate: 180
+  - id: c
+    name: Ines
+    gender: f
+    rate: 205
+  - id: d
+    name: Aaron
+    gender: m
+    rate: 172
+  - id: e
+    name: Beth
+    gender: f
+    rate: 200
+  - id: f
+    name: Daniel
+    gender: m
+    rate: 185
+
+turns:
+  - speaker: a
+    text: "Right, everyone's here, let's get started."
+  - speaker: a
+    text: "First item is the outage from last night, that's incident three seven, dash, one four."
+    gap: 0.3
+
+  - speaker: b
+    text: "I can walk through it quickly."
+    gap: 0.2
+  - speaker: b
+    text: "At two nineteen the primary queue stopped draining and nothing alerted for eleven minutes."
+    gap: 0.25
+
+  # c interrupts before b finishes
+  - speaker: c
+    text: "Eleven minutes? I thought the threshold was five."
+    gap: -0.5
+
+  - speaker: b
+    text: "It is five, but the alert fires on queue depth, and depth looked normal because nothing was arriving either."
+    gap: 0.15
+
+  - speaker: d
+    text: "So we were blind to it by design."
+    gap: 0.2
+
+  - speaker: b
+    text: "Effectively, yes."
+    gap: 0.15
+
+  # two people answer simultaneously
+  - speaker: e
+    text: "We should alert on throughput, not depth."
+    gap: -0.7
+  - speaker: f
+    text: "Throughput alone will page us every deploy."
+    gap: -0.9
+
+  - speaker: a
+    text: "One at a time, please."
+    gap: 0.3
+
+  - speaker: e
+    text: "My point is depth can't distinguish healthy and dead, and throughput can."
+    gap: 0.25
+
+  - speaker: f
+    text: "And my point is we already tried that in March and turned it off after four days of noise."
+    gap: 0.2
+
+  - speaker: c
+    text: "I remember that."
+    gap: 0.15
+
+  - speaker: d
+    text: "Could we alert on both, and only page when both are abnormal?"
+    gap: 0.2
+
+  - speaker: b
+    text: "That would have caught last night."
+    gap: 0.15
+
+  - speaker: a
+    text: "Let's cost that before we commit to it."
+    gap: 0.25
+  - speaker: a
+    text: "Second item, and I need a decision today: the storage migration."
+    gap: 0.25
+
+  - speaker: f
+    text: "I'd rather we didn't start that this quarter."
+    gap: 0.2
+
+  - speaker: c
+    text: "We've been saying that for three quarters."
+    gap: -0.5
+
+  - speaker: f
+    text: "Because every quarter something like last night happens."
+    gap: 0.2
+
+  - speaker: e
+    text: "How much is it actually costing us to wait?"
+    gap: 0.2
+
+  - speaker: d
+    text: "About eleven hundred a month in duplicated storage, and roughly two days of engineering time."
+    gap: 0.2
+
+  - speaker: a
+    text: "Per month?"
+    gap: 0.15
+
+  - speaker: d
+    text: "Per month."
+    gap: 0.15
+
+  - speaker: c
+    text: "Then waiting is the expensive option, not the safe one."
+    gap: 0.2
+
+  - speaker: b
+    text: "Agreed, but I'd want a rollback path written down before we move anything."
+    gap: 0.2
+
+  - speaker: a
+    text: "That's reasonable."
+    gap: 0.2
+  - speaker: a
+    text: "Callum writes the rollback, Beth and Daniel scope the alerting change, Ines owns the migration plan."
+    gap: 0.25
+
+  - speaker: e
+    text: "What's the deadline?"
+    gap: 0.2
+
+  - speaker: a
+    text: "End of next week, so we can review it on the twenty second."
+    gap: 0.2
+
+  - speaker: f
+    text: "I'll need access to the staging cluster for that."
+    gap: 0.2
+
+  - speaker: b
+    text: "I'll send you the credentials after this."
+    gap: 0.15
+
+  - speaker: c
+    text: "One more thing before we close."
+    gap: 0.2
+  - speaker: c
+    text: "The customer on account nine nine four, dash, six zero eight is still waiting on an answer from us."
+    gap: 0.2
+
+  - speaker: a
+    text: "I'll take that one."
+    gap: 0.15
+
+  - speaker: a
+    text: "Good, that's everything, thanks all."
+    gap: 0.3

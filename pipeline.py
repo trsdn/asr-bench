@@ -324,7 +324,10 @@ def main() -> int:
     if args.run_name:
         out = Path("runs") / args.run_name / "pipeline"
         out.mkdir(parents=True, exist_ok=True)
-        name = result["config"].replace("/", "_").replace("+", "_")
+        # The session belongs in the filename: without it, benchmarking two
+        # sessions under one run name silently overwrites the first result.
+        session_tag = Path(result["session"]).name
+        name = f"{session_tag}__{result['config']}".replace("/", "_").replace("+", "_")
         (out / f"{name}.json").write_text(json.dumps(result, indent=2))
         print(f"  → {out / (name + '.json')}")
     return 0

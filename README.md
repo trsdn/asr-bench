@@ -735,9 +735,12 @@ The mechanism is visible in the DER split. Forced to four clusters, TitaNet
 must place every window in one of them, so overlapped and ambiguous speech is
 merged into confident wrong assignments and each stream is contaminated.
 Left free, it over-segments; four clusters carry most of the words cleanly
-and the six spurious ones cost only their own content as insertions.
-**Cluster purity beats cluster count when the metric is cpWER** — being
+and the six spurious ones cost only their own content as insertions. Being
 fragmented is recoverable, being merged is not.
+
+That mechanism is real, but it is **not** a rule you can apply blind — see the
+six-speaker results below, where the same hint on the same backend helps in one
+language and hurts in the other.
 
 **Near-perfect diarisation still costs about four points of word accuracy.**
 The same ASR model on the undiarised mix scores 16.7 % WER against the
@@ -748,8 +751,9 @@ non-adjacent speech removes context. For `whisper-large-v3` the gap is wider
 still: 12.2 % flat against 18.6 % attributed, +6.4 points.
 
 That trade has no equivalent in either half's own table, and it is the number
-a deployment actually pays: **attribution is not free, and the bill is
-roughly a quarter of your word accuracy.** Whether that is worth it depends
+a deployment actually pays: **attribution is not free.** On this session the
+bill is roughly a quarter of your word accuracy; on others it is larger, and
+on one it is negative (see below). Whether it is worth paying depends
 entirely on whether anyone needs to know who said what — which is exactly the
 choice this repo exists to inform.
 
@@ -759,6 +763,62 @@ flat benchmark: `whisper-large-v3` degrades most gracefully when a second
 voice cuts in, and that survives being wrapped in a pipeline.
 
 A full 8-model matrix on a 90-second session takes roughly 10 minutes. Longer sessions scale linearly — plan accordingly.
+
+### Six speakers: where the end-to-end diarizers stop
+
+`crosstalk-*` has four speakers, which happens to be exactly where the
+Sortformer family is comfortable. `allhands-de` (123.6 s, 2.8 % overlap) and
+`allhands-en` (105.5 s, 2.6 % overlap) have six, and are otherwise built the
+same way. ASR is `parakeet-tdt-v3` throughout so the diarizer is the only
+variable.
+
+| Session | Diarizer | speakers told | cpWER | DER | speakers found | Wall clock |
+|---|---|---|---:|---:|---:|---:|
+| `allhands-de` | titanet | 6 | **21.5 %** | 6.1 % | 6 | 125 s |
+| `allhands-de` | titanet | *auto* | 32.5 % | 11.1 % | 13 | 195 s |
+| `allhands-de` | sortformer | 6 | 47.2 % | 20.6 % | **4** | 60 s |
+| `allhands-de` | sortformer-streaming | 6 | 60.3 % | 34.2 % | **4** | 52 s |
+| `allhands-en` | titanet | *auto* | **12.4 %** | 8.0 % | 9 | 123 s |
+| `allhands-en` | titanet | 6 | 35.1 % | 21.9 % | 6 | 96 s |
+| `allhands-en` | sortformer-streaming | 6 | 55.8 % | 25.9 % | **4** | 54 s |
+| `allhands-en` | sortformer | 6 | 67.0 % | 28.3 % | **4** | 48 s |
+
+**Both Sortformer variants report exactly four speakers, in both languages,
+even when told there are six.** Four runs, four times the same answer. This is
+an architectural ceiling, not a tuning problem: the end-to-end models emit a
+fixed number of speaker channels, and the count they were told is ignored.
+They do not *drop* the two extra people — they **merge** them into existing
+channels, which is the failure mode cpWER prices most harshly, because one
+merge contaminates two streams. The winner of the four-speaker table is the
+loser here by 26 points.
+
+**The best diarizer flips with speaker count.** End-to-end wins at four,
+clustering wins at six. Nothing in either component's own benchmark predicts
+this, and neither architecture is simply better.
+
+**The speaker-count hint is not a reliable input.** Across three sessions the
+same knob points in different directions:
+
+| Session | told the truth | left to guess | hint helps? |
+|---|---:|---:|:--:|
+| `crosstalk-de` (4 spk, 9.3 % overlap) | 53.9 % | 32.4 % (found 10) | no, −21.5 |
+| `allhands-de` (6 spk, 2.8 % overlap) | 21.5 % | 32.5 % (found 13) | yes, +11.0 |
+| `allhands-en` (6 spk, 2.6 % overlap) | 35.1 % | 12.4 % (found 9) | no, −22.7 |
+
+Two of three prefer the guess, but the exception is large and it is not
+explained by speaker count, language, or overlap density — the two German
+sessions differ in both directions at once. Overlap density is confounded with
+speaker count in this design, so these runs cannot separate them. The
+actionable conclusion is the conservative one: **`--num-speakers` is a
+parameter to search, not a fact to pass through**, even when you genuinely
+know the answer. That is precisely the case [#17](../../issues/17) exists for.
+
+**The attribution bill is not a constant either.** Against the same model on
+the undiarised mix: German 23.3 % flat vs 21.5 % attributed — the pipeline is
+*cheaper* than the baseline, because splitting a six-way mix gives the ASR
+model cleaner input than the overlapped whole. English 5.6 % flat vs 12.4 %
+attributed, +6.8 points. So the "roughly a quarter of your word accuracy"
+figure from the four-speaker table is a data point, not a law.
 
 ## Repo layout
 
