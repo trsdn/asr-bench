@@ -6,9 +6,13 @@ __pycache__/
 *.egg-info/
 .ruff_cache/
 
-# Run outputs (transcripts, metrics, reports) — don't commit to the repo,
-# they can be hundreds of MB per run.
-runs/
+# Real/ad-hoc run outputs (transcripts, metrics, reports) can contain
+# private meeting content and can be hundreds of MB per run.
+runs/*
+
+# Synthetic benchmark outputs are safe fixtures and should be versioned.
+!runs/synthetic*/
+!runs/synthetic*/**
 
 # Any audio the user drops here for ad-hoc testing.
 audio/
