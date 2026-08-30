@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Documented dependency alert handling, the remaining upstream-constrained
+	`hydra-core` alert, and run artifact handling.
+
+### Changed
+
+- Refreshed the Python lockfile to update or remove vulnerable transitive
+	dependencies where current constraints allow it.
+- Kept private and ad-hoc run outputs ignored while allowing synthetic benchmark
+	outputs to be versioned.
+
 ## [0.1.0] - 2026-04-30
 
 ### Added
